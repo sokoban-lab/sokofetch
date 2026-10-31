@@ -77,7 +77,7 @@ struct FetchArgs {
     #[command(flatten)]
     connection: Connection,
 
-    /// Output file [default: <COLLECTION> with '/' replaced by '-'>.txt]
+    /// Output file (default: `<COLLECTION>` with '/' replaced by '-'.txt)
     #[arg(short, long, value_name = "FILE")]
     output: Option<PathBuf>,
 

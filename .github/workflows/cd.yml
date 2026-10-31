@@ -2,29 +2,131 @@ name: CD
 
 on:
   push:
-    tags: ["v*"]
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
 
 jobs:
+  meta:
+    name: Resolve build ref
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      ref: ${{ steps.version.outputs.ref }}
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Resolve tag and version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --no-deps --locked --format-version 1 \
+            | jq -r '.packages[] | select(.name == "sokobanonline") | .version')
+
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            tag="$GITHUB_REF_NAME"
+            if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "invalid release tag: $tag" >&2
+              exit 1
+            fi
+            if [[ "v$version" != "$tag" ]]; then
+              echo "tag $tag does not match Cargo.toml version $version" >&2
+              exit 1
+            fi
+            git rev-parse "refs/tags/$tag" >/dev/null
+            git fetch --no-tags origin main
+            if ! git merge-base --is-ancestor HEAD origin/main; then
+              echo "tag $tag does not point to a commit on main" >&2
+              exit 1
+            fi
+            ref="refs/tags/$tag"
+          else
+            tag=""
+            ref="$GITHUB_SHA"
+            echo "::notice::Manual build; building sokofetch $version artifacts only."
+          fi
+
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  test:
+    name: Test (${{ matrix.os }})
+    needs: meta
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.meta.outputs.ref }}
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run tests
+        run: cargo test --locked --workspace --all-features --all-targets
+
   build:
-    name: Build ${{ matrix.target }}
+    name: Build (${{ matrix.target }})
+    needs: [meta, test]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc }
-          - { os: macos-latest,   target: aarch64-apple-darwin }
-          - { os: macos-latest,   target: x86_64-apple-darwin }
-    runs-on: ${{ matrix.os }}
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+
     steps:
-      - name: Check out repository
+      - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.meta.outputs.ref }}
+          persist-credentials: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -39,48 +141,90 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }}
 
+      - name: Strip binary
+        if: runner.os != 'Windows'
+        run: strip "target/${{ matrix.target }}/release/sokobanonline"
+
       - name: Package release archive
         shell: bash
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
         run: |
-          name="sokobanonline-${GITHUB_REF_NAME#v}-${{ matrix.target }}"
+          set -euo pipefail
+          name="sokobanonline-${VERSION}-${{ matrix.target }}"
           stage="${RUNNER_TEMP:?}/${name}"
           mkdir -p "${stage}" dist
+
           exe="sokobanonline"
           if [[ "${{ matrix.target }}" == *-windows-* ]]; then
             exe="sokobanonline.exe"
           fi
           cp "target/${{ matrix.target }}/release/${exe}" "${stage}/"
           cp README.md LICENSE-APACHE LICENSE-MIT "${stage}/"
+
           if [[ "${{ matrix.target }}" == *-windows-* ]]; then
             7z a "dist/${name}.zip" "${stage}" > /dev/null
           else
+            chmod +x "${stage}/${exe}"
             tar -czf "dist/${name}.tar.gz" -C "${RUNNER_TEMP}" "${name}"
           fi
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:
-          name: dist-${{ matrix.target }}
+          name: sokobanonline-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
+          retention-days: 7
 
-  publish:
-    name: Publish GitHub Release
-    needs: build
+  release:
+    name: Publish release
+    needs: [meta, build]
+    if: needs.meta.outputs.tag != ''
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
+
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.meta.outputs.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Generate release notes
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --current --strip header
+          version: v2.14.2
+        env:
+          OUTPUT: release-notes.md
+          GITHUB_REPO: ${{ github.repository }}
+
       - name: Download build artifacts
         uses: actions/download-artifact@v8
         with:
+          pattern: sokobanonline-*
           path: dist
           merge-multiple: true
 
-      - name: Create GitHub release
-        uses: softprops/action-gh-release@v3
-        with:
-          files: dist/*
-          generate_release_notes: true
+      - name: Publish GitHub release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.meta.outputs.tag }}
+          VERSION: ${{ needs.meta.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          assets=(dist/sokobanonline-*.tar.gz dist/sokobanonline-*.zip)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "$VERSION Release" --notes-file release-notes.md
+            gh release upload "$TAG" "${assets[@]}" --clobber
+          else
+            gh release create "$TAG" "${assets[@]}" \
+              --title "$VERSION Release" --notes-file release-notes.md --verify-tag
+          fi
