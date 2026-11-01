@@ -12,8 +12,10 @@ The two are not equivalent: Sokoban Online's `modern` boards carry rails, ice, d
 portals that XSB cannot express, so 392 of 459 sampled levels are skipped; Let's Logic only
 has eight tile types and converts 1104 of 1104.
 
-Only Sokoban Online is implemented, in `src/sites/sokobanonline/`. The Let's Logic notes are
-research, and its `robots.txt` currently forbids the pages a fetcher would need.
+Both are implemented, in `src/sites/sokobanonline/` and `src/sites/letslogic/`. What differs is
+the cost and the courtesy: Sokoban Online needs one request per level and asks for a delay,
+while Let's Logic embeds every board in its listing but puts the pages behind a `robots.txt`
+whitelist that excludes them (see §8 of its note).
 
 ## Implementing another site
 

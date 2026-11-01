@@ -2,30 +2,20 @@
 //! (see docs/api/sokobanonline.md).
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use anyhow::{Context, bail};
 use indicatif::ProgressBar;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use ureq::Agent;
+
+use crate::http::Fetcher;
 
 const BASE: &str = "https://www.sokobanonline.com/api/v1";
-const USER_AGENT: &str = "Mozilla/5.0 (personal level archiver; one-off fetch)";
-const MAX_ATTEMPTS: u32 = 4;
 
 /// The requested pack/author page does not exist.
-#[derive(Debug)]
-pub struct NotFound(pub String);
-
-impl std::fmt::Display for NotFound {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "not found: {}", self.0)
-    }
-}
-
-impl std::error::Error for NotFound {}
+pub use crate::http::NotFound;
 
 #[derive(Debug, Deserialize)]
 struct Meta {
@@ -233,10 +223,7 @@ pub fn display_path(full_slug: &str) -> &str {
 /// Sequential, rate-limited API client shared across the fetch phases.
 pub struct Client {
     base: String,
-    agent: Agent,
-    delay: Duration,
-    retry_backoff: Duration,
-    stop: Arc<AtomicBool>,
+    http: Fetcher,
 }
 
 impl Client {
@@ -255,18 +242,7 @@ impl Client {
     ) -> Self {
         Self {
             base: base.to_owned(),
-            agent: Agent::config_builder()
-                .timeout_connect(Some(Duration::from_secs(15)))
-                .timeout_global(Some(timeout))
-                .user_agent(USER_AGENT)
-                // 4xx/5xx must come back as Ok so the Retry-After header and
-                // the error body remain accessible.
-                .http_status_as_error(false)
-                .build()
-                .new_agent(),
-            delay,
-            retry_backoff,
-            stop,
+            http: Fetcher::with(delay, timeout, retry_backoff, stop),
         }
     }
 
@@ -283,81 +259,9 @@ impl Client {
         )
     }
 
-    fn stopped(&self) -> bool {
-        self.stop.load(Ordering::Relaxed)
-    }
-
-    /// Sleep in short slices so Ctrl+C takes effect promptly.
-    fn sleep(&self, duration: Duration) -> anyhow::Result<()> {
-        let mut left = duration;
-        while left > Duration::ZERO {
-            if self.stopped() {
-                bail!("interrupted by user");
-            }
-            let step = left.min(Duration::from_millis(100));
-            std::thread::sleep(step);
-            left -= step;
-        }
-        Ok(())
-    }
-
-    /// GET one URL (absolute) with retries, returning the raw body.
-    fn get_text(&self, url: &str) -> anyhow::Result<String> {
-        for attempt in 1..=MAX_ATTEMPTS {
-            if self.stopped() {
-                bail!("interrupted by user");
-            }
-            match self.agent.get(url).call() {
-                Ok(response) => {
-                    // http_status_as_error is disabled: 4xx/5xx arrive as Ok.
-                    let code = response.status().as_u16();
-                    if code == 429 {
-                        let wait = response
-                            .headers()
-                            .get("Retry-After")
-                            .and_then(|value| value.to_str().ok())
-                            .and_then(|value| value.trim().parse::<u64>().ok())
-                            .unwrap_or(30);
-                        eprintln!("  rate limited, waiting {wait}s ...");
-                        self.sleep(Duration::from_secs(wait))?;
-                        continue;
-                    }
-                    if code >= 500 && attempt < MAX_ATTEMPTS {
-                        self.sleep(self.retry_backoff * attempt)?;
-                        continue;
-                    }
-                    if code == 404 {
-                        return Err(NotFound(url.to_owned()).into());
-                    }
-                    if !(200..300).contains(&code) {
-                        bail!(
-                            "HTTP {code} for {url}: {}",
-                            error_excerpt(response.into_body())
-                        );
-                    }
-                    let body = response
-                        .into_body()
-                        .read_to_string()
-                        .with_context(|| format!("reading response of {url}"))?;
-                    self.sleep(self.delay)?;
-                    return Ok(body);
-                }
-                Err(err) => {
-                    if attempt < MAX_ATTEMPTS {
-                        eprintln!("  request failed ({err}), retrying ...");
-                        self.sleep(self.retry_backoff * attempt)?;
-                        continue;
-                    }
-                    return Err(err).with_context(|| format!("requesting {url}"));
-                }
-            }
-        }
-        bail!("giving up on {url} after {MAX_ATTEMPTS} attempts")
-    }
-
     fn get_json<D: DeserializeOwned>(&self, path: &str) -> anyhow::Result<Envelope<D>> {
         let url = format!("{}{path}", self.base);
-        let body = self.get_text(&url)?;
+        let body = self.http.get_text(&url)?;
         let envelope: Envelope<D> =
             serde_json::from_str(&body).with_context(|| format!("decoding response of {url}"))?;
         if envelope.status != "success" {
@@ -493,29 +397,10 @@ fn path_to_fullslug(path: &str) -> String {
         .to_owned()
 }
 
-/// Pull a human-readable message out of an API error envelope, falling back to raw text.
-fn error_excerpt(mut body: ureq::Body) -> String {
-    let text = body.read_to_string().unwrap_or_default();
-    let message = serde_json::from_str::<serde_json::Value>(&text)
-        .ok()
-        .and_then(|value| {
-            value
-                .pointer("/data/error/message")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-        });
-    let joined = message.unwrap_or(text);
-    let line = joined.lines().next().unwrap_or_default();
-    if line.chars().count() <= 200 {
-        line.to_owned()
-    } else {
-        line.chars().take(200).collect()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
 
     /// Puzzle detail with the site's wire field names, plus extra fields the
     /// real payloads carry (they must be ignored).

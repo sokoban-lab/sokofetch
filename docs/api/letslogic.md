@@ -180,4 +180,19 @@ is materially stricter than Sokoban Online's `Disallow: /api/` (see
 [sokobanonline.md](sokobanonline.md) §7). There is no crawl path the site sanctions here:
 the one `/api` exception is key-gated, and none of its documented endpoints is a board export.
 
+### What the fetcher does about it
+
+`src/sites/letslogic/` exists anyway, because the decision to fetch a page is the user's and the
+tool is a one-off personal archiver rather than a crawler. What it does with that:
+
+- **No discovery.** Nothing is enumerated or walked: a fetch only ever reads the level or
+  collection the user names. There is no sitemap pass, no `/collections` crawl, no link following.
+- **No per-level requests.** The listing already carries every board (§5), so a 1104-level
+  collection costs 12 requests at `items=100` — the largest page size the site's own interface
+  offers — rather than 1104.
+- **One request at a time**, with `--delay` between them (1 s by default), a timeout, and
+  `Retry-After` honoured on 429.
+- **The warning stays in the README**, so the constraint is in front of whoever runs it rather
+  than buried here.
+
 Level copyrights belong to their authors; do not redistribute.

@@ -15,8 +15,8 @@ use anyhow::{Context, bail, ensure};
 use indicatif::ProgressBar;
 
 use super::{
-    Collection, CollectionRef, Group, Level, LevelRef, Outcome, Plan, Scope, Site, Skip, SkipKind,
-    Target, Work,
+    Address, Collection, CollectionRef, Group, Level, LevelRef, Outcome, Plan, Scope, Site, Skip,
+    SkipKind, Target, Work, address,
 };
 
 /// Host the collection paths and page URLs belong to.
@@ -71,7 +71,7 @@ impl Site for SokobanOnline {
     fn target(&self, input: &str) -> anyhow::Result<Option<Target>> {
         let trimmed = input.trim();
         ensure!(!trimmed.is_empty(), "empty collection path");
-        let path = match address(trimmed) {
+        let path = match address(trimmed, HOST) {
             // A link to some other site: not ours to parse.
             Address::Foreign => return Ok(None),
             Address::Bare => trimmed,
@@ -218,38 +218,6 @@ impl SokobanOnline {
             .map(|item| Work::Pending(level_ref(item, &target.path)))
             .collect();
         Ok(Plan { collection, work })
-    }
-}
-
-/// How an input is addressed.
-enum Address<'a> {
-    /// A bare path, e.g. `t1024/corner-set`.
-    Bare,
-    /// A page URL of this site; the part after the host.
-    Owned(&'a str),
-    /// A URL of some other host.
-    Foreign,
-}
-
-fn address(input: &str) -> Address<'_> {
-    let (rest, scheme) = ["https://", "http://"]
-        .iter()
-        .find_map(|scheme| input.strip_prefix(scheme))
-        .map_or((input, false), |rest| (rest, true));
-    let (rest, www) = match rest.strip_prefix("www.") {
-        Some(rest) => (rest, true),
-        None => (rest, false),
-    };
-    let (host, tail) = match rest.split_once('/') {
-        Some((host, tail)) => (host, tail),
-        None => (rest, ""),
-    };
-    if host == HOST {
-        Address::Owned(tail)
-    } else if scheme || www {
-        Address::Foreign
-    } else {
-        Address::Bare
     }
 }
 

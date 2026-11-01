@@ -68,18 +68,29 @@ type Handler = Box<dyn Fn(usize, &str) -> Action + Send + Sync>;
 
 /// A throwaway HTTP server on 127.0.0.1 serving one test.
 pub struct MockServer {
-    /// Base URL for `Client::with_base`, e.g. `http://127.0.0.1:49152/api/v1`.
+    /// Base URL a client is pointed at, e.g. `http://127.0.0.1:49152/api/v1`.
     pub base: String,
+    /// The path `base` ends in, stripped from the recorded targets so a test
+    /// asserts on what the site's own client asked for.
+    prefix: String,
     handler: Mutex<Option<Handler>>,
     calls: Mutex<Vec<String>>,
 }
 
 impl MockServer {
+    /// A server for Sokoban Online, whose API lives under `/api/v1`.
     pub fn start() -> Arc<Self> {
+        Self::start_with("/api/v1")
+    }
+
+    /// A server whose base URL ends in `prefix` — empty for a site whose paths
+    /// start at the root.
+    pub fn start_with(prefix: &str) -> Arc<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
         let port = listener.local_addr().expect("local addr").port();
         let server = Arc::new(Self {
-            base: format!("http://127.0.0.1:{port}/api/v1"),
+            base: format!("http://127.0.0.1:{port}{prefix}"),
+            prefix: prefix.to_owned(),
             handler: Mutex::new(None),
             calls: Mutex::new(Vec::new()),
         });
@@ -134,7 +145,12 @@ impl MockServer {
         }
         let (call, target) = {
             let mut calls = self.calls.lock().expect("calls lock");
-            calls.push(target.strip_prefix("/api/v1").unwrap_or(target).to_owned());
+            calls.push(
+                target
+                    .strip_prefix(self.prefix.as_str())
+                    .unwrap_or(target)
+                    .to_owned(),
+            );
             (calls.len() - 1, calls.last().expect("just pushed").clone())
         };
 
@@ -285,4 +301,60 @@ pub fn wire_listing_loose(
         }
     })
     .to_string()
+}
+
+/// The markup of one Let's Logic level card, copied from a real page
+/// (docs/api/letslogic.md §2): the plate attributes, the header link pair, the
+/// record cell and the footer. `rows` are the digit map's rows, so the declared
+/// size always matches the map.
+pub fn wire_plate(
+    id: u64,
+    name: &str,
+    collection: u64,
+    collection_name: &str,
+    rows: &[&str],
+) -> String {
+    let width = rows.first().map_or(0, |row| row.len());
+    let map = rows.concat();
+    format!(
+        r#"<div class="plate" id="divPlate{id}" data-level-id="{id}" data-level-map-height="{height}" data-level-map-width="{width}" data-level-map-sha1="0e49" data-level-map="{map}">
+			<div class="plate-header">
+				<div class="plate-header-left">
+					<a href="/collection/{collection}">{collection_name}</a> / <a title="{name}" id="level_title_{id}" href="/level/{id}">{name}</a>
+				</div>
+				<div class="plate-header-right">
+					<a href="/level/{id}/play">&nbsp;<img title="Play" border="0" src="/images/play.png">&nbsp;</a>
+				</div>
+			</div>
+			<div class="plate-body">
+				<table class="plateTable">
+					<tr>
+						<td class="blue">
+							<span class="name">Site Move Record</span>
+							<span class="val"> 1,191 <span class="move_push_separator"></span> 284</span>
+						</td>
+						<td class="blue">
+							<span class="name">Your Move Record</span>
+							<span class="val">-</span>
+						</td>
+					</tr>
+				</table>
+			</div>
+			<div class="plate-footer">
+				<div style="display: flex; justify-content: space-between;">
+					<div>by <a href="/level/search?edt_author=&quot;Werner Ettinger&quot;">Werner Ettinger</a> + <a href="/level/search?edt_author=&quot;xht2xsb&quot;">xht2xsb</a></div>
+					<div>published by <i class="flag flag-si" title="Slovenia"></i> Mark</div>
+				</div>
+			</div>
+		</div>"#,
+        height = rows.len(),
+    )
+}
+
+/// A whole page holding `plates`, as the site renders them inside its layout.
+pub fn wire_page(plates: &[String]) -> String {
+    format!(
+        "<html><body><div id=\"div_main\">{}</div></body></html>",
+        plates.join("\n")
+    )
 }

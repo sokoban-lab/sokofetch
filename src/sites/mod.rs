@@ -6,16 +6,22 @@
 //!
 //! # Adding a site
 //!
-//! 1. Add `src/sites/<name>/` with an `impl Site`, following `sokobanonline`:
-//!    `target` claims the inputs the site owns and returns `None` for the rest,
-//!    `inspect`/`plan` list a collection, `fetch` returns one level.
-//! 2. Convert its board encoding to XSB and pass the result to
+//! 1. Add `src/sites/<name>/` with an `impl Site`, following `sokobanonline` or
+//!    `letslogic`: `inspect`/`plan` list a collection, `fetch` returns one
+//!    level, `id_from_url` reads the id back out of a `; URL:` line.
+//! 2. Write `target` to claim only what the site can recognise — `Ok(None)` for
+//!    anything else, so the next site gets a turn. `Err` is for input that is
+//!    the site's own and is still wrong (a page on its host with a shape it
+//!    does not have), never for input that simply belongs elsewhere: [`resolve`]
+//!    asks every site in turn and stops at the first error.
+//! 3. Convert its board encoding to XSB and pass the result to
 //!    [`crate::xsb::validate`]. A board the format cannot express (a mechanism,
 //!    a co-op level) is an [`Outcome::Skip`] with [`SkipKind::Unsupported`], so
 //!    it is counted and reported instead of silently disappearing.
-//! 3. Register it in [`all`] — after the sites whose bare paths it could also
-//!    match, because the first site that claims an input wins.
-//! 4. Record what the site stores and what its `robots.txt` allows in
+//! 4. Register it in [`all`], narrowest first: the first site that claims an
+//!    input wins, so a site with a handful of path shapes goes before one that
+//!    treats any bare word as an author.
+//! 5. Record what the site stores and what its `robots.txt` allows in
 //!    `docs/api/<name>.md`.
 
 use std::sync::Arc;
@@ -25,13 +31,21 @@ use std::time::Duration;
 use anyhow::bail;
 use indicatif::ProgressBar;
 
+pub mod letslogic;
 pub mod sokobanonline;
 
 /// Every site this build knows, in the order an input is offered to them.
+///
+/// Order matters: the first site that claims an input gets it. Let's Logic goes
+/// first because it only claims the two path shapes it actually has
+/// (`level/<id>`, `collection/<id>`), while Sokoban Online claims any bare path
+/// at all — as an author, a pack or a level. Anything the narrower site does
+/// not recognise falls through to the wider one.
 pub fn all(delay: Duration, timeout: Duration, stop: Arc<AtomicBool>) -> Vec<Box<dyn Site>> {
-    vec![Box::new(sokobanonline::SokobanOnline::new(
-        delay, timeout, stop,
-    ))]
+    vec![
+        Box::new(letslogic::LetsLogic::new(delay, timeout, stop.clone())),
+        Box::new(sokobanonline::SokobanOnline::new(delay, timeout, stop)),
+    ]
 }
 
 /// Pick the site an input addresses. The first site that claims the input
@@ -49,6 +63,42 @@ pub fn resolve<'a>(sites: &'a [Box<dyn Site>], input: &str) -> anyhow::Result<&'
         bail!("no supported site addresses {input:?}");
     }
     bail!("no supported site addresses {input:?}; paste the page URL instead")
+}
+
+/// How an input is addressed, before a site decides whether it is its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Address<'a> {
+    /// A bare path, e.g. `t1024/corner-set`.
+    Bare,
+    /// A page URL of the given host; the part after the host.
+    Owned(&'a str),
+    /// A URL of some other host.
+    Foreign,
+}
+
+/// Split an input into the part a site parses. `host` is matched without its
+/// `www.`, so both spellings of a site's own pages arrive as [`Address::Owned`]
+/// while every other host stays [`Address::Foreign`] and is not an error.
+pub fn address<'a>(input: &'a str, host: &str) -> Address<'a> {
+    let (rest, scheme) = ["https://", "http://"]
+        .iter()
+        .find_map(|scheme| input.strip_prefix(scheme))
+        .map_or((input, false), |rest| (rest, true));
+    let (rest, www) = match rest.strip_prefix("www.") {
+        Some(rest) => (rest, true),
+        None => (rest, false),
+    };
+    let (host_part, tail) = match rest.split_once('/') {
+        Some((host_part, tail)) => (host_part, tail),
+        None => (rest, ""),
+    };
+    if host_part == host {
+        Address::Owned(tail)
+    } else if scheme || www {
+        Address::Foreign
+    } else {
+        Address::Bare
+    }
 }
 
 /// What an input addresses.
@@ -299,13 +349,30 @@ mod tests {
         )
         .unwrap();
         assert_eq!(site.name(), "Sokoban Online");
+        // the narrower site is asked first, so its own shapes reach it
+        let site = resolve(&known, "level/89411").unwrap();
+        assert_eq!(site.name(), "Let's Logic");
+        let site = resolve(&known, "https://www.letslogic.com/collection/632").unwrap();
+        assert_eq!(site.name(), "Let's Logic");
+    }
+
+    #[test]
+    fn a_site_leaves_paths_it_does_not_recognise_to_the_next_one() {
+        let known = sites();
+        // `level` is Let's Logic's word only when an id follows it
+        let site = resolve(&known, "level").unwrap();
+        assert_eq!(site.name(), "Sokoban Online", "a bare `level` is an author");
+        // ... and a numeric author stays Sokoban Online's, since Let's Logic
+        // never claims a bare id
+        let site = resolve(&known, "89411").unwrap();
+        assert_eq!(site.name(), "Sokoban Online");
     }
 
     #[test]
     fn resolve_rejects_inputs_no_site_owns() {
         let known = sites();
-        // another site's page is nobody's business here
-        let err = resolve(&known, "https://www.letslogic.com/level/89411")
+        // a host nobody supports is not an error inside a parser
+        let err = resolve(&known, "https://example.com/level/1")
             .err()
             .unwrap();
         let text = err.to_string();

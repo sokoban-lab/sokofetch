@@ -10,6 +10,7 @@
 //! up in. Sites live in `src/sites/`; `sites::all` lists them and
 //! `sites::resolve` picks the one an input addresses.
 
+mod http;
 mod sites;
 #[cfg(test)]
 mod test_support;
@@ -58,7 +59,8 @@ struct Connection {
     #[arg(value_name = "COLLECTION")]
     collection: String,
 
-    /// Seconds to sleep between requests (robots.txt asks for 5)
+    /// Seconds to sleep between requests (Sokoban Online's robots.txt asks
+    /// for 5)
     #[arg(long, value_name = "SECONDS", default_value_t = 1.0)]
     delay: f64,
 
@@ -267,10 +269,15 @@ fn info_level(site: &dyn Site, level: &LevelRef) -> anyhow::Result<()> {
     line.push_str(&facts.author);
     anstream::println!("{line}");
     anstream::println!("  {}", facts.url);
+    // A site that only learns the collection from the level's own page has
+    // none to name here, so the level's account of it stands alone.
+    let owner = if level.collection.is_empty() {
+        facts.collection_name.clone()
+    } else {
+        format!("{} ({})", level.collection, facts.collection_name)
+    };
     anstream::println!(
-        "  pack: {} ({}){}",
-        level.collection,
-        facts.collection_name,
+        "  pack: {owner}{}",
         match &facts.published {
             Some(date) => format!(" · published {date}"),
             None => String::new(),
@@ -305,8 +312,10 @@ fn info_collection(site: &dyn Site, target: &CollectionRef) -> anyhow::Result<()
     }
 
     if collection.groups.is_empty() {
+        // No sub-packs to summarise, so the levels themselves are the summary —
+        // however many pages the site spreads them over.
         anstream::println!(
-            "{} · {} puzzles, all directly on the page",
+            "{} · {} puzzles, in a single list",
             collection.name,
             collection.own.len()
         );
