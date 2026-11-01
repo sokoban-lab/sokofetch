@@ -1,14 +1,14 @@
 //! Inspect and fetch author collections from sokobanonline.com.
 //!
 //! A collection is a pack plus every level below it: the levels of its
-//! sub-packs and the ones sitting directly on its page, which the site itself
-//! never links to. `info` describes both kinds and `fetch` downloads both, so
-//! neither needs a flag to be complete. The collection is addressed by the path
-//! of its page relative to `sokobanonline.com/play/community/`: `<author>`,
-//! `<author>/<pack>`, or `<author>/` for the levels on the page itself — the one
-//! collection that has no name. Levels that an XSB loader cannot represent
-//! (mechanisms, co-op, decoy boxes) are skipped; docs/API.md documents the API
-//! and the board encoding.
+//! sub-packs and the ones sitting directly on its page, which the listing
+//! reports apart from the sub-packs. `info` describes both kinds and `fetch`
+//! downloads both, so neither needs a flag to be complete. The collection is
+//! addressed by the path of its page relative to `sokobanonline.com/play/community/`:
+//! `<author>`, `<author>/<pack>`, or `<author>/` for the levels on the page
+//! itself — the one collection that has no name. Levels that an XSB loader
+//! cannot represent (mechanisms, co-op, decoy boxes) are skipped; docs/API.md
+//! documents the API and the board encoding.
 
 mod api;
 mod convert;
@@ -298,16 +298,14 @@ fn info_unnamed(client: &Client, author: &str) -> anyhow::Result<()> {
     let spinner = ProgressBar::new_spinner();
     spinner.enable_steady_tick(Duration::from_millis(100));
     let (pack, listing) = client.list_pack(author, &spinner)?;
-    // Nothing is named on a flat page, so its unnamed collection is all of it.
-    // Elsewhere the sitemap is the only way to know which levels these are, so
-    // it is read even when the counters claim there are none: they are the
-    // site's own tally and can be stale, while this is the whole answer.
+    spinner.finish_and_clear();
+    // Nothing is named on a flat page, so its unnamed collection is all of it;
+    // on a container it is exactly the bundle listed outside the sub-packs.
     let levels = if listing.packs.is_empty() {
         listing.puzzles
     } else {
-        client.fetch_page_levels(author, &spinner)?
+        listing.loose
     };
-    spinner.finish_and_clear();
 
     if levels.is_empty() {
         anstream::println!("{} · no levels directly on the page", pack.name);
@@ -358,20 +356,7 @@ fn info_container(client: &Client, target: &Target) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // The counters only say *how many* levels sit on the page, never which
-    // ones; naming them costs the sitemap scan, so it is skipped whenever the
-    // arithmetic proves there are none.
-    let grouped: Option<u64> = listing.packs.iter().map(|sub| sub.num_puzzles).sum();
-    let hidden = api::hidden_estimate(&pack, grouped, listing.puzzles.len() as u64);
-    let on_page = if hidden == Some(0) {
-        Vec::new()
-    } else {
-        let spinner = ProgressBar::new_spinner();
-        spinner.enable_steady_tick(Duration::from_millis(100));
-        let levels = client.fetch_page_levels(collection, &spinner);
-        spinner.finish_and_clear();
-        levels?
-    };
+    let on_page = listing.loose;
 
     let suffix = if on_page.is_empty() {
         String::new()
@@ -413,7 +398,7 @@ fn info_container(client: &Client, target: &Target) -> anyhow::Result<()> {
             on_page.len(),
             width = width
         );
-        // The sitemap carries ids, not names; they are what `fetch` works from.
+        // The ids are what `fetch` works from, so they are listed as well.
         let indent = " ".repeat(width + 10);
         for chunk in on_page.chunks(6) {
             let ids: Vec<String> = chunk
@@ -436,7 +421,7 @@ fn fetch_and_write(
     stop: &Arc<AtomicBool>,
 ) -> anyhow::Result<bool> {
     // Phase 1: learn the puzzle ids — the collection listing, its sub-packs,
-    // and, only when the counters show levels no sub-pack holds, the sitemap.
+    // and the levels the listing reports outside every sub-pack.
     let spinner = ProgressBar::new_spinner();
     spinner.enable_steady_tick(Duration::from_millis(100));
     spinner.set_style(
@@ -445,24 +430,17 @@ fn fetch_and_write(
     spinner.set_message(format!("listing {} ...", target.path()));
     let collected = match target {
         // The unnamed collection: one listing to confirm the author exists and
-        // to know whether anything is named, then only the levels on the page.
-        Target::Page(author) => client
-            .list_pack(author, &spinner)
-            .and_then(|(pack, listing)| {
-                // The counters only hint at how many there are, and this
-                // collection is exactly what was asked for: read the sitemap.
-                let items = if listing.packs.is_empty() {
-                    // nothing is named, so the unnamed collection is the page
-                    listing.puzzles
-                } else {
-                    client.fetch_page_levels(author, &spinner)?
-                };
-                Ok(Collection {
-                    pack,
-                    items,
-                    hidden: Some(0),
-                })
-            }),
+        // to learn whether anything is named, then only the levels on the page.
+        Target::Page(author) => client.list_pack(author, &spinner).map(|(pack, listing)| {
+            // Nothing is named on a flat page, so its unnamed collection is all
+            // of it; on a container it is the bundle outside the sub-packs.
+            let items = if listing.packs.is_empty() {
+                listing.puzzles
+            } else {
+                listing.loose
+            };
+            Collection { pack, items }
+        }),
         _ => client.fetch_pack(target.path(), &spinner),
     };
     let collected = match collected {
@@ -476,20 +454,9 @@ fn fetch_and_write(
             return Err(err);
         }
     };
-    let on_page = if collected.hidden == Some(0) {
-        Vec::new()
-    } else {
-        let levels = client.fetch_page_levels(target.path(), &spinner)?;
-        let mut seen: HashSet<i64> = collected.items.iter().map(|item| item.puzzle_id).collect();
-        levels
-            .into_iter()
-            .filter(|item| seen.insert(item.puzzle_id))
-            .collect()
-    };
     spinner.finish_and_clear();
     let pack = collected.pack;
     let mut items = collected.items;
-    items.extend(on_page);
 
     // Everything already in the output file is left alone when resuming, so a
     // re-run only pays for the levels that appeared since the last one.
@@ -914,8 +881,8 @@ mod tests {
     // ---- end-to-end tests against a local mock of the API ----
 
     use crate::test_support::{
-        Action, MockServer, Response, wire_detail, wire_listing, wire_pack_counted, wire_pack_item,
-        wire_pack_item_counted, wire_puzzle_item,
+        Action, MockServer, Response, wire_detail, wire_listing, wire_listing_loose,
+        wire_pack_counted, wire_pack_item, wire_pack_item_counted, wire_puzzle_item,
     };
     use std::sync::atomic::AtomicUsize;
 
@@ -1246,8 +1213,7 @@ mod tests {
             Action::Respond(Response::json(
                 200,
                 wire_listing(
-                    // the counter accounts for both sub-packs (3 + 3), so no
-                    // level sits on the page and no sitemap scan is needed
+                    // no `loose` bundle: nothing sits on the page
                     Some(wire_pack_counted("t1024", 6)),
                     vec![
                         wire_pack_item("community/t1024/corner-set"),
@@ -1339,32 +1305,17 @@ mod tests {
 
     // ---- levels that sit directly on the page (docs/API.md §3.2.1) ----
 
-    const SITEMAP_INDEX: &str = r#"<sitemapindex>
-<sitemap><loc>https://www.sokobanonline.com/sitemaps/packs.xml</loc></sitemap>
-<sitemap><loc>https://www.sokobanonline.com/sitemaps/puzzles-1.xml</loc></sitemap>
-</sitemapindex>"#;
-
-    /// `99` sits directly on the author page, `11` is already listed through
-    /// the sub-pack and must not be fetched twice.
-    const SITEMAP_SHARD: &str = r#"<urlset>
-<url><loc>https://www.sokobanonline.com/play/community/t1024/99_p99</loc></url>
-<url><loc>https://www.sokobanonline.com/play/community/t1024/corner-set/11_p11</loc></url>
-</urlset>"#;
-
-    /// A container page whose sub-pack holds `11`, while the pack counter says
-    /// the collection has one more level — the one that lives on the page.
+    /// A container page whose sub-pack holds `11`, and `99` sitting on the
+    /// page itself, outside every sub-pack.
     fn page_levels_handler() -> impl Fn(usize, &str) -> Action + Send + Sync + 'static {
         |_call, target| match target {
-            "/sitemap.xml" => Action::Respond(Response::plain(200, SITEMAP_INDEX)),
-            "/sitemaps/puzzles-1.xml" => Action::Respond(Response::plain(200, SITEMAP_SHARD)),
             "/packs/by-path/community/t1024?page=1" => Action::Respond(Response::json(
                 200,
-                wire_listing(
+                wire_listing_loose(
                     Some(wire_pack_counted("t1024", 2)),
-                    // the counter matches the one level the sub-pack holds, so
-                    // the arithmetic alone says one level sits on the page
                     vec![wire_pack_item_counted("community/t1024/corner-set", 1)],
                     1,
+                    vec![wire_puzzle_item(99)],
                 ),
             )),
             "/packs/by-path/community/t1024/corner-set?page=1" => Action::Respond(Response::json(
@@ -1401,8 +1352,6 @@ mod tests {
             [
                 "/packs/by-path/community/t1024?page=1",
                 "/packs/by-path/community/t1024/corner-set?page=1",
-                "/sitemap.xml",
-                "/sitemaps/puzzles-1.xml",
                 "/puzzles/11",
                 "/puzzles/99"
             ]
@@ -1415,7 +1364,7 @@ mod tests {
     }
 
     #[test]
-    fn run_skips_the_sitemap_when_the_counters_prove_nothing_is_hidden() {
+    fn run_a_container_without_ungrouped_levels_fetches_only_its_sub_packs() {
         let dir = scratch_dir("no-page-levels");
         let out = dir.join("out.txt");
         let (server, client, stop) = mock(|_call, target| match target {
@@ -1442,10 +1391,14 @@ mod tests {
             run(fetch_cmd("t1024", &out), &client, &stop).unwrap(),
             ExitCode::SUCCESS
         );
-        assert!(
-            !server.calls().iter().any(|t| t.contains("sitemap")),
-            "the counters account for every level: {:?}",
-            server.calls()
+        assert_eq!(
+            server.calls(),
+            [
+                "/packs/by-path/community/t1024?page=1",
+                "/packs/by-path/community/t1024/corner-set?page=1",
+                "/puzzles/11"
+            ],
+            "the listing alone tells the whole collection"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1461,12 +1414,7 @@ mod tests {
         );
         assert_eq!(
             server.calls(),
-            [
-                "/packs/by-path/community/t1024?page=1",
-                "/sitemap.xml",
-                "/sitemaps/puzzles-1.xml",
-                "/puzzles/99"
-            ],
+            ["/packs/by-path/community/t1024?page=1", "/puzzles/99"],
             "the sub-pack is neither listed nor fetched"
         );
         let text = std::fs::read_to_string(&out).expect("output file");
@@ -1506,11 +1454,7 @@ mod tests {
         );
         assert_eq!(
             server.calls(),
-            [
-                "/packs/by-path/community/t1024?page=1",
-                "/sitemap.xml",
-                "/sitemaps/puzzles-1.xml"
-            ],
+            ["/packs/by-path/community/t1024?page=1"],
             "no sub-pack listing and no puzzle details"
         );
     }
@@ -1582,8 +1526,8 @@ Author: T1024
         );
         assert_eq!(
             server.calls().len() - calls_before,
-            4,
-            "the listings and the sitemap, no detail fetch: {:?}",
+            2,
+            "the two listings, no detail fetch: {:?}",
             &server.calls()[calls_before..]
         );
         assert_eq!(

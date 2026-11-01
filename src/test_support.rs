@@ -235,3 +235,23 @@ pub fn wire_listing(
     })
     .to_string()
 }
+
+/// The same envelope for a container page, carrying the bundle of levels that
+/// sit directly on the page next to its sub-packs.
+pub fn wire_listing_loose(
+    pack: Option<serde_json::Value>,
+    items: Vec<serde_json::Value>,
+    total: u64,
+    loose: Vec<serde_json::Value>,
+) -> String {
+    serde_json::json!({
+        "status": "success",
+        "meta": { "total": total },
+        "data": {
+            "pack": pack,
+            "items": items,
+            "loose": { "total": loose.len(), "items": loose }
+        }
+    })
+    .to_string()
+}
