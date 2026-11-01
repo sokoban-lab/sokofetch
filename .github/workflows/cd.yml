@@ -194,6 +194,10 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # `GITHUB_REPO` would make git-cliff enrich the notes with pull-request
+      # data, but pull requests are disabled on this repository, so those lookups
+      # 404 and git-cliff aborts. The template only reads commit messages, so the
+      # notes are generated from the local history instead.
       - name: Generate release notes
         uses: orhun/git-cliff-action@v4
         with:
@@ -202,7 +206,6 @@ jobs:
           version: v2.14.2
         env:
           OUTPUT: release-notes.md
-          GITHUB_REPO: ${{ github.repository }}
 
       - name: Download build artifacts
         uses: actions/download-artifact@v8
