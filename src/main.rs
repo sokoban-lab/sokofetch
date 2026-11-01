@@ -51,11 +51,12 @@ enum Command {
 /// What every request-making subcommand shares.
 #[derive(Debug, Args)]
 struct Connection {
-    /// Collection path: `<author>`, `<author>/<pack>`, or `<author>/` for the
-    /// levels sitting directly on the author's page. `<author>` alone means the
-    /// whole author (sub-packs merged); the trailing slash names the one
-    /// collection that has no name of its own. A path ending in a level segment
-    /// — `<author>[/<pack>]/<id>_<slug>`, the tail of the level's own page URL —
+    /// Collection path, or the page URL it appears in: `<author>`,
+    /// `<author>/<pack>`, or `<author>/` for the levels sitting directly on the
+    /// author's page. `<author>` alone means the whole author (sub-packs
+    /// merged); the trailing slash names the one collection that has no name of
+    /// its own. A path ending in a level segment —
+    /// `<author>[/<pack>]/<id>_<slug>`, the tail of the level's own page URL —
     /// addresses that one level
     #[arg(value_name = "COLLECTION")]
     collection: String,
@@ -297,20 +298,56 @@ fn parse_level(segments: &[&str]) -> Option<Level> {
     })
 }
 
+/// The site a pasted link points at.
+const SITE: &str = "sokobanonline.com";
+
+/// Reduce a page URL to the path this tool addresses, so a link copied out of
+/// the browser works as well as the path itself: the scheme and host are
+/// dropped, and so is the `/play/community/` prefix the collection paths are
+/// relative to. Anything that is not a link to this site is left untouched and
+/// validated as a path, which is what rejects it.
+fn strip_url(input: &str) -> anyhow::Result<&str> {
+    let trimmed = input.trim();
+    let rest = ["https://", "http://"]
+        .iter()
+        .find_map(|scheme| trimmed.strip_prefix(scheme))
+        .unwrap_or(trimmed);
+    let rest = rest.strip_prefix("www.").unwrap_or(rest);
+    let Some(after_host) = rest.strip_prefix(SITE) else {
+        return Ok(trimmed);
+    };
+    let path = after_host.trim_start_matches('/');
+    // A link may carry a query or a fragment; neither names a collection.
+    let path = path.split(['?', '#']).next().unwrap_or_default();
+    let path = path.strip_prefix("play/community/").ok_or_else(|| {
+        anyhow::anyhow!(
+            "unsupported URL {trimmed:?}: expected \
+             https://www.{SITE}/play/community/<path>"
+        )
+    })?;
+    ensure!(
+        !path.trim_end_matches('/').is_empty(),
+        "unsupported URL {trimmed:?}: it names no collection"
+    );
+    Ok(path)
+}
+
 /// Validate the collection path and say what it addresses: `<author>`,
 /// `<author>/<pack>`, `<author>/` for the one collection that has no name, or
-/// `<author>[/<pack>]/<id>_<slug>` for a single level.
+/// `<author>[/<pack>]/<id>_<slug>` for a single level. The path may also be
+/// pasted as the page URL it comes from.
 /// Allowed characters per segment are `[a-zA-Z0-9_-]`.
 fn parse_collection(input: &str) -> anyhow::Result<Target> {
     let trimmed = input.trim();
-    ensure!(!trimmed.is_empty(), "empty collection path");
+    let path = strip_url(trimmed)?;
+    ensure!(!path.is_empty(), "empty collection path");
     // A trailing slash names the empty collection, i.e. the levels sitting on
     // the page itself. A pack holds no sub-packs, so there the empty name
     // resolves to the pack's own levels — the same thing. A level is not a
     // collection either, so the slash adds nothing there as well.
-    let (path, unnamed) = match trimmed.strip_suffix('/') {
+    let (path, unnamed) = match path.strip_suffix('/') {
         Some(rest) => (rest, true),
-        None => (trimmed, false),
+        None => (path, false),
     };
     ensure!(
         path.split('/').all(|segment| {
@@ -609,12 +646,14 @@ fn fetch_and_write(
         }
         _ => {
             spinner.set_message(format!("listing {} ...", target.path()));
-            client.fetch_pack(&target.path(), &spinner).map(|collection| {
-                (
-                    collection.pack,
-                    collection.items.into_iter().map(Work::Lookup).collect(),
-                )
-            })
+            client
+                .fetch_pack(&target.path(), &spinner)
+                .map(|collection| {
+                    (
+                        collection.pack,
+                        collection.items.into_iter().map(Work::Lookup).collect(),
+                    )
+                })
         }
     };
     let collected = match collected {
@@ -662,10 +701,8 @@ fn fetch_and_write(
         bail!(
             "{}",
             match target {
-                Target::Level(level) => format!(
-                    "--limit 0 leaves nothing to fetch of {}",
-                    level.path()
-                ),
+                Target::Level(level) =>
+                    format!("--limit 0 leaves nothing to fetch of {}", level.path()),
                 Target::Page(_) => format!(
                     "no levels sit directly on the page of {}",
                     api::display_path(&pack.full_slug)
@@ -761,7 +798,10 @@ fn fetch_and_write(
                         if args.verbose {
                             note(
                                 &progress,
-                                &format!("  skipped {} {}: {reason}", puzzle.puzzle_id, puzzle.name),
+                                &format!(
+                                    "  skipped {} {}: {reason}",
+                                    puzzle.puzzle_id, puzzle.name
+                                ),
                             );
                         }
                     }
@@ -1061,6 +1101,69 @@ mod tests {
             "obyzz011/remakes/135023_morch",
             "the API path is the same as the page path"
         );
+    }
+
+    #[test]
+    fn page_urls_address_the_same_things_as_paths() {
+        let base = "https://www.sokobanonline.com/play/community";
+        let author = |s: &str| Target::Author(s.to_owned());
+        let pack = |s: &str| Target::Pack(s.to_owned());
+        let page = |s: &str| Target::Page(s.to_owned());
+
+        assert_eq!(
+            parse_collection(&format!("{base}/obyzz011")).unwrap(),
+            author("obyzz011")
+        );
+        // the empty name after the slash still means the levels on the page
+        assert_eq!(
+            parse_collection(&format!("{base}/obyzz011/")).unwrap(),
+            page("obyzz011")
+        );
+        assert_eq!(
+            parse_collection(&format!("{base}/obyzz011/remakes")).unwrap(),
+            pack("obyzz011/remakes")
+        );
+        assert_eq!(
+            parse_collection(&format!("{base}/obyzz011/remakes/135023_morch")).unwrap(),
+            Target::Level(Level {
+                collection: "obyzz011/remakes".into(),
+                id: 135023,
+                slug: "morch".into(),
+            })
+        );
+        // http, no `www.`, a query or a fragment, and surrounding blanks
+        assert_eq!(
+            parse_collection("http://sokobanonline.com/play/community/obyzz011").unwrap(),
+            author("obyzz011")
+        );
+        assert_eq!(
+            parse_collection(" https://www.sokobanonline.com/play/community/obyzz011?ref=list ")
+                .unwrap(),
+            author("obyzz011")
+        );
+        assert_eq!(
+            parse_collection(&format!("{base}/obyzz011/remakes#levels")).unwrap(),
+            pack("obyzz011/remakes")
+        );
+
+        // links to something else, or to no collection at all
+        assert!(parse_collection("https://example.com/play/community/obyzz011").is_err());
+        assert!(parse_collection("https://www.sokobanonline.com/play/web-archive/a/b").is_err());
+        assert!(parse_collection("https://www.sokobanonline.com/play/community/").is_err());
+        assert!(parse_collection("https://www.sokobanonline.com/").is_err());
+    }
+
+    #[test]
+    fn unsupported_urls_say_what_was_expected() {
+        let err =
+            parse_collection("https://www.sokobanonline.com/play/web-archive/a/b").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("expected https://www.sokobanonline.com/play/community/<path>"),
+            "{err:#}"
+        );
+        let err = parse_collection("https://www.sokobanonline.com/play/community/").unwrap_err();
+        assert!(err.to_string().contains("names no collection"), "{err:#}");
     }
 
     #[test]
@@ -1856,7 +1959,9 @@ Author: T1024
         assert!(text.contains("; 1 XSB levels"));
         assert!(text.contains("Title: Morch\n"));
         assert!(text.contains("Author: obyzz011\n"));
-        assert!(text.contains("; URL: https://www.sokobanonline.com/play/community/obyzz011/remakes/135023\n"));
+        assert!(text.contains(
+            "; URL: https://www.sokobanonline.com/play/community/obyzz011/remakes/135023\n"
+        ));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1868,7 +1973,8 @@ Author: T1024
             mock(|_call, _target| Action::Respond(Response::json(404, "{}")));
         let err = run(fetch_cmd(MORCH, &out), &client, &stop).unwrap_err();
         assert!(
-            err.to_string().contains("level not found: obyzz011/remakes/135023_morch"),
+            err.to_string()
+                .contains("level not found: obyzz011/remakes/135023_morch"),
             "{err:#}"
         );
         assert_eq!(server.calls(), ["/puzzles/135023"], "404 is not retried");
@@ -1933,7 +2039,8 @@ Author: T1024
             mock(|_call, _target| Action::Respond(Response::json(404, "{}")));
         let err = run(info_cmd(MORCH), &client, &stop).unwrap_err();
         assert!(
-            err.to_string().contains("level not found: obyzz011/remakes/135023_morch"),
+            err.to_string()
+                .contains("level not found: obyzz011/remakes/135023_morch"),
             "{err:#}"
         );
     }

@@ -14,6 +14,7 @@ and exporting them as an [XSB] level collection.
   and 429/5xx retry. `membercontainer` authors are fetched pack by pack.
 - **One level**: A path ending in a level segment fetches just that level — one
   request, no listing.
+- **Paste a link**: The page URL works wherever a path does.
 - **XSB output**: An XSB collection with per-level metadata, validated by [soukoban].
 - **Classic only**: Skips modern puzzles and boards the parser rejects
   (co-op, decoy boxes, ...).
@@ -45,6 +46,15 @@ A path whose last segment starts with a number addresses one level instead of a
 collection: `<author>[/<pack>]/<id>_<slug>`, exactly the tail of the level's own page
 URL. The slug is decoration — `<author>/<pack>/135023` fetches the same level — and a
 level needs an author in front of it, so `<id>` alone stays an author name.
+
+Everywhere a path is expected, the page URL it appears in works too — the scheme, host
+and `/play/community/` prefix are dropped:
+
+```sh
+sokofetch fetch https://www.sokobanonline.com/play/community/obyzz011
+sokofetch fetch https://www.sokobanonline.com/play/community/obyzz011/remakes
+sokofetch fetch https://www.sokobanonline.com/play/community/obyzz011/remakes/135023_morch
+```
 
 `--delay` and `--timeout` are accepted by both subcommands; `--output`, `--limit`,
 `--verbose` and `--resume` only make sense for `fetch`, so `info` rejects them.

@@ -349,6 +349,11 @@ URL — fetches that one level: `GET /puzzles/{id}` (§3.3) is the only request,
 object it returns names the collection the level belongs to. The API reports that pack without a  
 `path`, so the CLI derives `/play/<fullslug>` from the slug.
 
+Both commands also accept the page URL itself (`https://www.sokobanonline.com/play/community/…`):  
+the scheme, host and `/play/community/` prefix are dropped, and a query or fragment is ignored.  
+Links to other collections (`/play/web-archive/…`) are rejected — the CLI only knows  
+`community/`.
+
 ## 7. Compliance
 
 robots.txt: `Disallow: /api/`, `Crawl-delay: 5`. Scraping is one-time, low-frequency, and for  
