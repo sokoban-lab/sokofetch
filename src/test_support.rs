@@ -179,7 +179,7 @@ pub fn wire_detail(id: i64, puzzle_type: &str, design: &str, guest_locked: bool)
 }
 
 /// A puzzle detail that names the pack it belongs to. Like the real payload,
-/// the `pack` object carries the slug but **no** `path` (docs/API.md §3.3).
+/// the `pack` object carries the slug but **no** `path` (docs/api/sokobanonline.md §3.3).
 pub fn wire_detail_in(
     id: i64,
     name: &str,

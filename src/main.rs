@@ -9,7 +9,7 @@
 //! itself — the one collection that has no name. A path ending in a level
 //! segment (`<author>[/<pack>]/<id>_<slug>`) addresses that one level. Levels
 //! that an XSB loader cannot represent (mechanisms, co-op, decoy boxes) are
-//! skipped; docs/API.md documents the API and the board encoding.
+//! skipped; docs/api/sokobanonline.md documents the API and the board encoding.
 
 mod api;
 mod convert;
@@ -192,7 +192,7 @@ impl SkipBreakdown {
 ///
 /// An author page is a container holding named sub-collections (its sub-packs)
 /// *and* one that has no name at all: the levels sitting directly on the page,
-/// which no sub-pack contains (docs/API.md §3.2.1). The path mirrors that, so
+/// which no sub-pack contains (docs/api/sokobanonline.md §3.2.1). The path mirrors that, so
 /// the empty name after the slash is the unnamed collection rather than a
 /// separate mode. A path that ends in a level segment addresses that one level
 /// instead of a collection of them.
@@ -497,7 +497,7 @@ fn info_unnamed(client: &Client, author: &str) -> anyhow::Result<()> {
 }
 
 /// Print what a container holds: its sub-packs, plus the levels that sit
-/// directly on the page rather than inside one of them (docs/API.md §3.2.1).
+/// directly on the page rather than inside one of them (docs/api/sokobanonline.md §3.2.1).
 /// Both kinds are rendered the same way — as rows of one table.
 fn info_container(client: &Client, target: &Target) -> anyhow::Result<()> {
     let collection = target.path();
@@ -777,7 +777,7 @@ fn fetch_and_write(
             fetched += 1;
             if puzzle.puzzle_type != "classic" {
                 // modern designs use a 4-chars-per-cell encoding XSB
-                // cannot express; docs/API.md §4.
+                // cannot express; docs/api/sokobanonline.md §4.
                 skipped += 1;
                 skipped_by.modern += 1;
                 if args.verbose {
@@ -1657,7 +1657,7 @@ mod tests {
         );
     }
 
-    // ---- levels that sit directly on the page (docs/API.md §3.2.1) ----
+    // ---- levels that sit directly on the page (docs/api/sokobanonline.md §3.2.1) ----
 
     /// A container page whose sub-pack holds `11`, and `99` sitting on the
     /// page itself, outside every sub-pack.

@@ -1,4 +1,4 @@
-//! Minimal client for the public sokobanonline.com REST API (see docs/API.md).
+//! Minimal client for the public sokobanonline.com REST API (see docs/api/sokobanonline.md).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -46,11 +46,11 @@ pub struct Pack {
     #[serde(rename = "fullslug")]
     pub full_slug: String,
     /// The page path. A listing reports it, a puzzle detail's `pack` does not
-    /// (docs/API.md §3.3), so it is derived from the slug when absent.
+    /// (docs/api/sokobanonline.md §3.3), so it is derived from the slug when absent.
     #[serde(default)]
     pub path: String,
     /// The site's own level counter for this pack. For a container it counts
-    /// its sub-packs' levels *and* its own (docs/API.md §3.2.1).
+    /// its sub-packs' levels *and* its own (docs/api/sokobanonline.md §3.2.1).
     #[serde(default, rename = "numpuzzles")]
     pub num_puzzles: Option<u64>,
 }
@@ -111,7 +111,7 @@ pub struct Listing {
     /// Levels that sit directly on the page instead of inside one of its
     /// sub-packs. The listing reports them as one unpaginated bundle next to
     /// its first page, so they arrive together with the sub-packs
-    /// (docs/API.md §3.2.1). Empty when the page holds none.
+    /// (docs/api/sokobanonline.md §3.2.1). Empty when the page holds none.
     pub loose: Vec<PuzzleItem>,
 }
 
@@ -182,7 +182,7 @@ pub struct Puzzle {
     #[serde(default)]
     pub author: Option<Author>,
     /// The pack the level belongs to. Carries the slug but no page path
-    /// (docs/API.md §3.3); `Pack::page_path` fills that in.
+    /// (docs/api/sokobanonline.md §3.3); `Pack::page_path` fills that in.
     #[serde(default)]
     pub pack: Option<Pack>,
 }
@@ -936,7 +936,7 @@ mod tests {
         assert_eq!(listing.packs[0].num_puzzles, Some(3));
     }
 
-    // ---- levels that belong to no sub-pack (docs/API.md §3.2.1) ----
+    // ---- levels that belong to no sub-pack (docs/api/sokobanonline.md §3.2.1) ----
 
     #[test]
     fn loose_levels_come_with_the_first_listing_page() {

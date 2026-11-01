@@ -4,7 +4,7 @@
 //! char per cell), so the only work is normalizing the `_`/`-` floor spellings
 //! to spaces. modern designs use a 4-chars-per-cell encoding XSB cannot
 //! express; the caller filters them out via `puzzletype`. Token tables:
-//! docs/API.md §4.
+//! docs/api/sokobanonline.md §4.
 
 /// classic design -> XSB board, or the reason the board cannot enter the
 /// collection. soukoban (the XSB parser this tool targets) performs the final

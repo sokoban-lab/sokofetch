@@ -1,7 +1,6 @@
 # Sokoban Online API Format Documentation & Data Profile
 
 > Reverse-engineered + empirically measured data profile. Data source: `https://www.sokobanonline.com`  
-> Profile sample: all 459 levels by author `soko7734` (scraped on 2026-10-23, 0 failures).  
 > ⚠️ The site's robots.txt declares `Disallow: /api/` (Crawl-delay: 5) — low-frequency, personal use only.
 
 ## 1. Overview
