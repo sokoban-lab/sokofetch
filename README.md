@@ -5,8 +5,8 @@
 > so keep fetches one-off, low-volume, and personal-use. Do not redistribute the fetched levels;
 > the copyright belongs to their authors.
 
-A toolchain for fetching levels of an author (community pack) from [Sokoban Online]
-and exporting them as an [XSB] level collection.
+A CLI tool for fetching levels from a Sokoban website and exporting them as an [XSB] level
+collection.
 
 ## Usage
 
@@ -32,5 +32,4 @@ Licensed under either of
 
 at your option.
 
-[Sokoban Online]: https://www.sokobanonline.com
 [XSB]: https://sokobano.de/wiki/index.php?title=Level_format

@@ -1,14 +1,14 @@
-//! Convert sokobanonline classic `design` boards to XSB text.
+//! Convert a sokobanonline classic `design` to XSB text.
 //!
-//! Only classic puzzles are converted: a classic design is already XSB (one
-//! char per cell), so the only work is normalizing the `_`/`-` floor spellings
-//! to spaces. modern designs use a 4-chars-per-cell encoding XSB cannot
-//! express; the caller filters them out via `puzzletype`. Token tables:
-//! docs/api/sokobanonline.md §4.
+//! A classic design is already XSB (one char per cell), so the only work is
+//! normalizing the `_`/`-` floor spellings to spaces. modern designs use a
+//! 4-chars-per-cell encoding XSB cannot express; the caller filters them out
+//! via `puzzletype`. Token tables: docs/api/sokobanonline.md §4.
+
+use crate::xsb;
 
 /// classic design -> XSB board, or the reason the board cannot enter the
-/// collection. soukoban (the XSB parser this tool targets) performs the final
-/// validation: standard alphabet, exactly 1 player, boxes == goals.
+/// collection.
 pub fn to_xsb(design: &str) -> Result<String, String> {
     let board = design
         .split('\n')
@@ -21,14 +21,7 @@ pub fn to_xsb(design: &str) -> Result<String, String> {
         .collect::<Vec<_>>()
         .join("\n");
     let board = board.trim_matches('\n');
-    // soukoban skips blank lines, but a blank row inside a level would read
-    // as the level separator of the collection format.
-    if board.lines().any(str::is_empty) {
-        return Err("board contains an empty row".into());
-    }
-    if let Err(err) = board.parse::<soukoban::map::Map>() {
-        return Err(format!("XSB parser rejected the board: {err}"));
-    }
+    xsb::validate(board)?;
     Ok(board.to_owned())
 }
 

@@ -163,8 +163,9 @@ Logged-in users can also get a pack's puzzles as one flat, paginated list from
 (401 without a session); that returns sub-pack puzzles and loose ones together.
 
 **Impact on this CLI**: none to recover — `data.loose` is read off the first listing page  
-(`Listing::loose` in `src/api.rs`), so a collection costs one request per listing and no sitemap  
-scan. If `loose.total` ever exceeds `loose.items`, the bundle was truncated and the CLI warns.
+(`Listing::loose` in `src/sites/sokobanonline/api.rs`), so a collection costs one request per
+listing and no sitemap scan. If `loose.total` ever exceeds `loose.items`, the bundle was
+truncated and the CLI warns.
 
 ### 3.3 `GET /api/v1/puzzles/{puzzleid}` ✅ Verified
 

@@ -1,4 +1,5 @@
-//! Minimal client for the public sokobanonline.com REST API (see docs/api/sokobanonline.md).
+//! Minimal client for the public sokobanonline.com REST API
+//! (see docs/api/sokobanonline.md).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -115,14 +116,6 @@ pub struct Listing {
     pub loose: Vec<PuzzleItem>,
 }
 
-/// A whole collection: the pack and every level it holds — the ones inside its
-/// sub-packs and the ones sitting directly on its page.
-#[derive(Debug)]
-pub struct Collection {
-    pub pack: Pack,
-    pub items: Vec<PuzzleItem>,
-}
-
 /// Listing entries come in two shapes: puzzles (`puzzle_id`) and sub-packs
 /// (`packid`/`full_slug`).
 #[derive(Debug, Deserialize)]
@@ -188,15 +181,6 @@ pub struct Puzzle {
 }
 
 impl Puzzle {
-    /// `name (id)`, or just the id when the site gives the level no name.
-    pub fn label(&self) -> String {
-        if self.name.is_empty() {
-            self.puzzle_id.to_string()
-        } else {
-            format!("{} ({})", self.name, self.puzzle_id)
-        }
-    }
-
     /// Display name of the level author, falling back to the pack name.
     pub fn author_name<'a>(&'a self, pack: &'a Pack) -> &'a str {
         self.author
@@ -382,36 +366,28 @@ impl Client {
         Ok(envelope)
     }
 
-    /// Fetch every puzzle of one author: either the author page lists puzzles
+    /// Fetch every puzzle of one collection: either the page lists puzzles
     /// directly, or it is a container whose sub-packs are fetched in turn.
-    pub fn fetch_pack(&self, username: &str, progress: &ProgressBar) -> anyhow::Result<Collection> {
-        match self.fetch_author(username, progress) {
-            Err(err) if err.downcast_ref::<NotFound>().is_some() => bail!(
-                "author/pack not found: {username} (https://www.sokobanonline.com/play/community/{username})"
-            ),
-            other => other,
-        }
-    }
-
-    /// List one collection: the pack plus its direct puzzles or
-    /// sub-packs, without fetching puzzle details.
-    pub fn list_pack(
+    /// Sub-pack levels come first, then the ones sitting on the page itself.
+    pub fn fetch_pack(
         &self,
-        username: &str,
+        path: &str,
         progress: &ProgressBar,
-    ) -> anyhow::Result<(Pack, Listing)> {
-        let fullslug = format!("community/{username}");
-        match self.fetch_listing(&fullslug, username, progress) {
+    ) -> anyhow::Result<(Pack, Vec<PuzzleItem>)> {
+        match self.fetch_pack_inner(path, progress) {
             Err(err) if err.downcast_ref::<NotFound>().is_some() => bail!(
-                "author/pack not found: {username} (https://www.sokobanonline.com/play/community/{username})"
+                "author/pack not found: {path} (https://www.sokobanonline.com/play/community/{path})"
             ),
             other => other,
         }
     }
 
-    fn fetch_author(&self, username: &str, progress: &ProgressBar) -> anyhow::Result<Collection> {
-        let (pack, listing) =
-            self.fetch_listing(&format!("community/{username}"), username, progress)?;
+    fn fetch_pack_inner(
+        &self,
+        path: &str,
+        progress: &ProgressBar,
+    ) -> anyhow::Result<(Pack, Vec<PuzzleItem>)> {
+        let (pack, listing) = self.fetch_listing(&format!("community/{path}"), path, progress)?;
         let mut items = Vec::new();
         // Container page: collect the puzzles of every sub-pack (one level deep).
         for sub in &listing.packs {
@@ -429,7 +405,29 @@ impl Client {
         // returns them as items, on a container as `loose`.
         items.extend(listing.puzzles);
         items.extend(listing.loose);
-        Ok(Collection { pack, items })
+        Ok((pack, items))
+    }
+
+    /// List one collection: the pack plus its direct puzzles or sub-packs,
+    /// without fetching puzzle details.
+    pub fn list_pack(&self, path: &str, progress: &ProgressBar) -> anyhow::Result<(Pack, Listing)> {
+        match self.list(&format!("community/{path}"), path, progress) {
+            Err(err) if err.downcast_ref::<NotFound>().is_some() => bail!(
+                "author/pack not found: {path} (https://www.sokobanonline.com/play/community/{path})"
+            ),
+            other => other,
+        }
+    }
+
+    /// List one page by its full slug, with `label` naming it in the progress
+    /// display.
+    pub fn list(
+        &self,
+        full_slug: &str,
+        label: &str,
+        progress: &ProgressBar,
+    ) -> anyhow::Result<(Pack, Listing)> {
+        self.fetch_listing(full_slug, label, progress)
     }
 
     /// Paginate `/packs/by-path/{fullslug}`; entries may be puzzles or sub-packs.
@@ -585,6 +583,18 @@ mod tests {
         assert!(puzzle.publish_date().is_none());
         assert!(!puzzle.guest_locked);
         assert!(puzzle.author.is_none());
+    }
+
+    #[test]
+    fn author_falls_back_to_the_pack_name() {
+        let mut puzzle: Puzzle = serde_json::from_str(DETAIL_JSON).unwrap();
+        let pack: Pack = serde_json::from_str(
+            r#"{ "name": "t1024", "fullslug": "community/t1024", "path": "/play/community/t1024" }"#,
+        )
+        .unwrap();
+        assert_eq!(puzzle.author_name(&pack), "T1024");
+        puzzle.author = None;
+        assert_eq!(puzzle.author_name(&pack), "t1024");
     }
 
     #[test]
@@ -808,9 +818,9 @@ mod tests {
                 wire_listing(Some(wire_pack("t1024")), items, 3),
             ))
         });
-        let collection = client.fetch_pack("t1024", &ProgressBar::hidden()).unwrap();
-        assert_eq!(collection.pack.name, "t1024");
-        let ids: Vec<i64> = collection.items.into_iter().map(|p| p.puzzle_id).collect();
+        let (pack, items) = client.fetch_pack("t1024", &ProgressBar::hidden()).unwrap();
+        assert_eq!(pack.name, "t1024");
+        let ids: Vec<i64> = items.into_iter().map(|p| p.puzzle_id).collect();
         assert_eq!(ids, [11, 12, 13]);
         let calls = server.calls();
         assert!(calls[0].ends_with("page=1"), "{calls:?}");
@@ -875,8 +885,8 @@ mod tests {
             };
             Action::Respond(Response::json(200, data))
         });
-        let collection = client.fetch_pack("t1024", &ProgressBar::hidden()).unwrap();
-        let ids: Vec<i64> = collection.items.into_iter().map(|p| p.puzzle_id).collect();
+        let (_, items) = client.fetch_pack("t1024", &ProgressBar::hidden()).unwrap();
+        let ids: Vec<i64> = items.into_iter().map(|p| p.puzzle_id).collect();
         assert_eq!(ids, [21, 22, 11], "the sub-packs' levels, then the page's");
         assert!(
             server.calls()[1].starts_with("/packs/by-path/community/t1024/corner-set"),
@@ -953,8 +963,8 @@ mod tests {
             };
             Action::Respond(Response::json(200, data))
         });
-        let collection = client.fetch_pack("t1024", &ProgressBar::hidden()).unwrap();
-        let ids: Vec<i64> = collection.items.iter().map(|p| p.puzzle_id).collect();
+        let (_, items) = client.fetch_pack("t1024", &ProgressBar::hidden()).unwrap();
+        let ids: Vec<i64> = items.iter().map(|p| p.puzzle_id).collect();
         assert_eq!(ids, [21, 99], "the sub-pack's levels, then the loose one");
         assert_eq!(
             server.calls(),
@@ -974,8 +984,8 @@ mod tests {
                 wire_listing(Some(wire_pack("t1024")), vec![wire_puzzle_item(11)], 1),
             ))
         });
-        let collection = client.fetch_pack("t1024", &ProgressBar::hidden()).unwrap();
-        let ids: Vec<i64> = collection.items.iter().map(|p| p.puzzle_id).collect();
+        let (_, items) = client.fetch_pack("t1024", &ProgressBar::hidden()).unwrap();
+        let ids: Vec<i64> = items.iter().map(|p| p.puzzle_id).collect();
         assert_eq!(ids, [11]);
     }
 
