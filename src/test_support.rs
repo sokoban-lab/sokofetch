@@ -178,6 +178,37 @@ pub fn wire_detail(id: i64, puzzle_type: &str, design: &str, guest_locked: bool)
     serde_json::json!({ "status": "success", "meta": { "total": 0 }, "data": data }).to_string()
 }
 
+/// A puzzle detail that names the pack it belongs to. Like the real payload,
+/// the `pack` object carries the slug but **no** `path` (docs/API.md §3.3).
+pub fn wire_detail_in(
+    id: i64,
+    name: &str,
+    puzzle_type: &str,
+    design: &str,
+    pack_full_slug: &str,
+    pack_name: &str,
+) -> String {
+    let data = serde_json::json!({
+        "puzzleid": id,
+        "name": name,
+        "path": format!("/play/{pack_full_slug}/{id}"),
+        "puzzletype": puzzle_type,
+        "width": 5,
+        "height": 3,
+        "design": design,
+        "guestlocked": false,
+        "publisheddate": "2026-07-21T13:26:12Z",
+        "author": { "userid": 1, "displayname": "obyzz011", "slug": "obyzz011" },
+        "pack": {
+            "packid": 2154,
+            "name": pack_name,
+            "fullslug": pack_full_slug,
+            "parent": { "packid": 2110, "name": "obyzz011", "fullslug": "community/obyzz011" }
+        }
+    });
+    serde_json::json!({ "status": "success", "meta": { "total": 0 }, "data": data }).to_string()
+}
+
 /// A pack object with `name` also used as slug/path tail.
 pub fn wire_pack(name: &str) -> serde_json::Value {
     serde_json::json!({

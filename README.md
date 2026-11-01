@@ -12,6 +12,8 @@ and exporting them as an [XSB] level collection.
 
 - **Fetch**: Downloads the pack listing and every puzzle detail, with request pacing
   and 429/5xx retry. `membercontainer` authors are fetched pack by pack.
+- **One level**: A path ending in a level segment fetches just that level — one
+  request, no listing.
 - **XSB output**: An XSB collection with per-level metadata, validated by [soukoban].
 - **Classic only**: Skips modern puzzles and boards the parser rejects
   (co-op, decoy boxes, ...).
@@ -28,6 +30,7 @@ sokofetch info  <username>              # what a collection holds, without fetch
 sokofetch fetch <username>              # whole author (sub-packs merged) -> <username>.txt
 sokofetch fetch <username>/<pack>       # one sub-pack -> <username>-<pack>.txt
 sokofetch fetch <username>/             # only the levels on the page -> <username>-page.txt
+sokofetch fetch <username>/<pack>/135023_morch  # one level -> <username>-<pack>-135023_morch.txt
 sokofetch fetch <username> --resume     # only the levels missing from the existing file
 sokofetch fetch <username> --limit 10   # small trial run first
 sokofetch fetch <username> --delay 5    # more polite request pacing
@@ -37,6 +40,11 @@ sokofetch fetch <username> --verbose    # log every skipped level
 A collection path is `<author>`, `<author>/<pack>`, or `<author>/` — the last names the
 collection that has no name of its own, i.e. the levels sitting directly on the author's
 page. A pack holds no sub-packs, so `<author>/<pack>/` is just that pack.
+
+A path whose last segment starts with a number addresses one level instead of a
+collection: `<author>[/<pack>]/<id>_<slug>`, exactly the tail of the level's own page
+URL. The slug is decoration — `<author>/<pack>/135023` fetches the same level — and a
+level needs an author in front of it, so `<id>` alone stays an author name.
 
 `--delay` and `--timeout` are accepted by both subcommands; `--output`, `--limit`,
 `--verbose` and `--resume` only make sense for `fetch`, so `info` rejects them.
@@ -89,6 +97,6 @@ Licensed under either of
 
 at your option.
 
-[Sokoban Online]: https://www.sokofetch.com
+[Sokoban Online]: https://www.sokobanonline.com
 [soukoban]: https://github.com/ShenMian/soukoban
 [XSB]: https://sokobano.de/wiki/index.php?title=Level_format

@@ -6,9 +6,10 @@
 //! downloads both, so neither needs a flag to be complete. The collection is
 //! addressed by the path of its page relative to `sokobanonline.com/play/community/`:
 //! `<author>`, `<author>/<pack>`, or `<author>/` for the levels on the page
-//! itself — the one collection that has no name. Levels that an XSB loader
-//! cannot represent (mechanisms, co-op, decoy boxes) are skipped; docs/API.md
-//! documents the API and the board encoding.
+//! itself — the one collection that has no name. A path ending in a level
+//! segment (`<author>[/<pack>]/<id>_<slug>`) addresses that one level. Levels
+//! that an XSB loader cannot represent (mechanisms, co-op, decoy boxes) are
+//! skipped; docs/API.md documents the API and the board encoding.
 
 mod api;
 mod convert;
@@ -27,7 +28,7 @@ use anyhow::{Context, bail, ensure};
 use clap::{Args, Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
 
-use crate::api::{Client, Collection, Pack, Puzzle};
+use crate::api::{Client, Pack, Puzzle, PuzzleItem};
 
 /// Fetch levels of an author collection from sokobanonline.com and write an
 /// XSB level collection (.txt).
@@ -53,7 +54,9 @@ struct Connection {
     /// Collection path: `<author>`, `<author>/<pack>`, or `<author>/` for the
     /// levels sitting directly on the author's page. `<author>` alone means the
     /// whole author (sub-packs merged); the trailing slash names the one
-    /// collection that has no name of its own
+    /// collection that has no name of its own. A path ending in a level segment
+    /// — `<author>[/<pack>]/<id>_<slug>`, the tail of the level's own page URL —
+    /// addresses that one level
     #[arg(value_name = "COLLECTION")]
     collection: String,
 
@@ -190,7 +193,8 @@ impl SkipBreakdown {
 /// *and* one that has no name at all: the levels sitting directly on the page,
 /// which no sub-pack contains (docs/API.md §3.2.1). The path mirrors that, so
 /// the empty name after the slash is the unnamed collection rather than a
-/// separate mode.
+/// separate mode. A path that ends in a level segment addresses that one level
+/// instead of a collection of them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Target {
     /// `<author>`: the author and every collection below it.
@@ -199,27 +203,111 @@ enum Target {
     Pack(String),
     /// `<author>/`: the collection that has no name.
     Page(String),
+    /// `<author>[/<pack>]/<id>_<slug>`: one level on its own.
+    Level(Level),
+}
+
+/// A single level, addressed the way the site's own level pages are:
+/// `<author>/<id>_<slug>` for one sitting directly on the author's page,
+/// `<author>/<pack>/<id>_<slug>` for one inside a sub-pack.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Level {
+    /// Everything before the level segment: the collection it belongs to.
+    collection: String,
+    /// The leading number of the level segment, which is all the API needs.
+    id: i64,
+    /// The `_<slug>` tail of the segment; empty when the site gives none.
+    slug: String,
+}
+
+impl Level {
+    /// `<collection>/<id>[_<slug>]`.
+    fn path(&self) -> String {
+        if self.slug.is_empty() {
+            format!("{}/{}", self.collection, self.id)
+        } else {
+            format!("{}/{}_{}", self.collection, self.id, self.slug)
+        }
+    }
+
+    /// The page URL of the level.
+    fn url(&self) -> String {
+        format!(
+            "https://www.sokobanonline.com/play/community/{}",
+            self.path()
+        )
+    }
+
+    /// Fetch the level's detail. Unlike a collection, a single level has
+    /// nothing to fall back on, so a missing one is an error that names it.
+    fn fetch(&self, client: &Client) -> anyhow::Result<Puzzle> {
+        match client.fetch_puzzle(self.id) {
+            Err(err) if err.downcast_ref::<api::NotFound>().is_some() => {
+                bail!("level not found: {} ({})", self.path(), self.url())
+            }
+            other => other,
+        }
+    }
+
+    /// The pack the level belongs to: the detail names it, but reports only its
+    /// slug, so `Pack::page_path` derives the page path from that. A detail
+    /// without a pack falls back to the collection the target names.
+    fn pack_of(&self, puzzle: &Puzzle) -> Pack {
+        puzzle.pack.clone().unwrap_or_else(|| Pack {
+            name: self
+                .collection
+                .rsplit('/')
+                .next()
+                .unwrap_or(&self.collection)
+                .to_owned(),
+            full_slug: format!("community/{}", self.collection),
+            path: format!("/play/community/{}", self.collection),
+            num_puzzles: None,
+        })
+    }
 }
 
 impl Target {
     /// Path after `community/`, i.e. what the API is asked about.
-    fn path(&self) -> &str {
+    fn path(&self) -> String {
         match self {
-            Self::Author(author) | Self::Page(author) => author,
-            Self::Pack(pack) => pack,
+            Self::Author(author) | Self::Page(author) => author.clone(),
+            Self::Pack(pack) => pack.clone(),
+            Self::Level(level) => level.path(),
         }
     }
 }
 
+/// Read the level out of a path that ends in a level segment, i.e. `<id>` or
+/// `<id>_<slug>`. A level is never addressed by its bare id, so a one-segment
+/// path stays an author; `<author>/<id>_<slug>` is a level on the page.
+fn parse_level(segments: &[&str]) -> Option<Level> {
+    let (last, collection) = segments.split_last()?;
+    if collection.is_empty() {
+        return None;
+    }
+    let (id, slug) = last.split_once('_').unwrap_or((last, ""));
+    if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some(Level {
+        collection: collection.join("/"),
+        id: id.parse().ok()?,
+        slug: slug.to_owned(),
+    })
+}
+
 /// Validate the collection path and say what it addresses: `<author>`,
-/// `<author>/<pack>`, or `<author>/` for the one collection that has no name.
+/// `<author>/<pack>`, `<author>/` for the one collection that has no name, or
+/// `<author>[/<pack>]/<id>_<slug>` for a single level.
 /// Allowed characters per segment are `[a-zA-Z0-9_-]`.
 fn parse_collection(input: &str) -> anyhow::Result<Target> {
     let trimmed = input.trim();
     ensure!(!trimmed.is_empty(), "empty collection path");
     // A trailing slash names the empty collection, i.e. the levels sitting on
     // the page itself. A pack holds no sub-packs, so there the empty name
-    // resolves to the pack's own levels — the same thing.
+    // resolves to the pack's own levels — the same thing. A level is not a
+    // collection either, so the slash adds nothing there as well.
     let (path, unnamed) = match trimmed.strip_suffix('/') {
         Some(rest) => (rest, true),
         None => (trimmed, false),
@@ -231,13 +319,17 @@ fn parse_collection(input: &str) -> anyhow::Result<Target> {
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         }),
-        "invalid collection path {trimmed:?} (expected <author>[/<pack>], \
+        "invalid collection path {trimmed:?} (expected <author>[/<pack>][/<id>_<slug>], \
          allowed characters [a-zA-Z0-9_-])"
     );
-    Ok(match path.split_once('/') {
-        None if unnamed => Target::Page(path.to_owned()),
-        None => Target::Author(path.to_owned()),
-        Some(_) => Target::Pack(path.to_owned()),
+    let segments: Vec<&str> = path.split('/').collect();
+    if let Some(level) = parse_level(&segments) {
+        return Ok(Target::Level(level));
+    }
+    Ok(match segments.as_slice() {
+        [_] if unnamed => Target::Page(path.to_owned()),
+        [_] => Target::Author(path.to_owned()),
+        _ => Target::Pack(path.to_owned()),
     })
 }
 
@@ -249,6 +341,7 @@ fn default_output(target: &Target) -> PathBuf {
         Target::Author(author) => PathBuf::from(format!("{author}.txt")),
         Target::Pack(pack) => PathBuf::from(format!("{}.txt", pack.replace('/', "-"))),
         Target::Page(author) => PathBuf::from(format!("{author}-page.txt")),
+        Target::Level(level) => PathBuf::from(format!("{}.txt", level.path().replace('/', "-"))),
     }
 }
 
@@ -288,8 +381,45 @@ fn validate(connection: &Connection) -> anyhow::Result<()> {
 fn info(client: &Client, target: &Target) -> anyhow::Result<()> {
     match target {
         Target::Page(author) => info_unnamed(client, author),
+        Target::Level(level) => info_level(client, level),
         _ => info_container(client, target),
     }
+}
+
+/// Describe one level: what it is, where it lives, and which pack holds it.
+fn info_level(client: &Client, level: &Level) -> anyhow::Result<()> {
+    let spinner = ProgressBar::new_spinner();
+    spinner.enable_steady_tick(Duration::from_millis(100));
+    let puzzle = level.fetch(client)?;
+    spinner.finish_and_clear();
+    let pack = level.pack_of(&puzzle);
+
+    let size = match (puzzle.width, puzzle.height) {
+        (Some(width), Some(height)) => format!(" · {width}x{height}"),
+        _ => String::new(),
+    };
+    let locked = if puzzle.guest_locked {
+        " · guest-locked"
+    } else {
+        ""
+    };
+    anstream::println!(
+        "{} · {}{size} · by {}{locked}",
+        puzzle.label(),
+        puzzle.puzzle_type,
+        puzzle.author_name(&pack),
+    );
+    anstream::println!("  https://www.sokobanonline.com{}", puzzle.path);
+    anstream::println!(
+        "  pack: {} ({}){}",
+        api::display_path(&pack.full_slug),
+        pack.name,
+        match puzzle.publish_date() {
+            Some(date) => format!(" · published {date}"),
+            None => String::new(),
+        },
+    );
+    Ok(())
 }
 
 /// Describe the collection that has no name: the levels sitting directly on an
@@ -309,7 +439,7 @@ fn info_unnamed(client: &Client, author: &str) -> anyhow::Result<()> {
 
     if levels.is_empty() {
         anstream::println!("{} · no levels directly on the page", pack.name);
-        anstream::println!("  https://www.sokobanonline.com{}", pack.path);
+        anstream::println!("  https://www.sokobanonline.com{}", pack.page_path());
         return Ok(());
     }
     anstream::println!(
@@ -317,7 +447,7 @@ fn info_unnamed(client: &Client, author: &str) -> anyhow::Result<()> {
         pack.name,
         levels.len()
     );
-    anstream::println!("  https://www.sokobanonline.com{}", pack.path);
+    anstream::println!("  https://www.sokobanonline.com{}", pack.page_path());
     anstream::println!();
     for chunk in levels.chunks(6) {
         let ids: Vec<String> = chunk
@@ -336,7 +466,7 @@ fn info_container(client: &Client, target: &Target) -> anyhow::Result<()> {
     let collection = target.path();
     let spinner = ProgressBar::new_spinner();
     spinner.enable_steady_tick(Duration::from_millis(100));
-    let (pack, listing) = client.list_pack(collection, &spinner)?;
+    let (pack, listing) = client.list_pack(&collection, &spinner)?;
     spinner.finish_and_clear();
 
     let total = pack
@@ -352,7 +482,7 @@ fn info_container(client: &Client, target: &Target) -> anyhow::Result<()> {
                 _ => "",
             }
         );
-        anstream::println!("  https://www.sokobanonline.com{}", pack.path);
+        anstream::println!("  https://www.sokobanonline.com{}", pack.page_path());
         return Ok(());
     }
 
@@ -369,7 +499,7 @@ fn info_container(client: &Client, target: &Target) -> anyhow::Result<()> {
         total,
         listing.packs.len()
     );
-    anstream::println!("  https://www.sokobanonline.com{}", pack.path);
+    anstream::println!("  https://www.sokobanonline.com{}", pack.page_path());
 
     let width = listing
         .packs
@@ -411,7 +541,33 @@ fn info_container(client: &Client, target: &Target) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Fetch one collection and write its XSB collection file.
+/// One unit of work: a level the listing named, still to be looked up, or one
+/// already fetched — a single-level target arrives with its detail in hand, so
+/// it costs one request instead of a listing plus a lookup.
+enum Work {
+    Lookup(PuzzleItem),
+    /// Boxed: a level is always the only item, so the box costs one allocation
+    /// and keeps the enum small for the hundreds of lookups a collection has.
+    Ready(Box<Puzzle>),
+}
+
+impl Work {
+    fn puzzle_id(&self) -> i64 {
+        match self {
+            Self::Lookup(item) => item.puzzle_id,
+            Self::Ready(puzzle) => puzzle.puzzle_id,
+        }
+    }
+
+    fn label(&self) -> String {
+        match self {
+            Self::Lookup(item) => item.label(),
+            Self::Ready(puzzle) => puzzle.label(),
+        }
+    }
+}
+
+/// Fetch one collection (or one level) and write its XSB collection file.
 /// Returns `true` when the user interrupted the fetch.
 fn fetch_and_write(
     client: &Client,
@@ -420,28 +576,46 @@ fn fetch_and_write(
     args: &FetchArgs,
     stop: &Arc<AtomicBool>,
 ) -> anyhow::Result<bool> {
-    // Phase 1: learn the puzzle ids — the collection listing, its sub-packs,
-    // and the levels the listing reports outside every sub-pack.
+    // Phase 1: learn what to fetch — the puzzle ids a collection's listing
+    // reports (its sub-packs and the levels the listing reports outside every
+    // sub-pack), or the one level a level path names.
     let spinner = ProgressBar::new_spinner();
     spinner.enable_steady_tick(Duration::from_millis(100));
     spinner.set_style(
         ProgressStyle::with_template("{spinner:.green} {msg}").expect("template is valid"),
     );
-    spinner.set_message(format!("listing {} ...", target.path()));
     let collected = match target {
+        Target::Level(level) => {
+            spinner.set_message(format!("fetching {} ...", level.path()));
+            level.fetch(client).map(|puzzle| {
+                let pack = level.pack_of(&puzzle);
+                (pack, vec![Work::Ready(Box::new(puzzle))])
+            })
+        }
         // The unnamed collection: one listing to confirm the author exists and
         // to learn whether anything is named, then only the levels on the page.
-        Target::Page(author) => client.list_pack(author, &spinner).map(|(pack, listing)| {
-            // Nothing is named on a flat page, so its unnamed collection is all
-            // of it; on a container it is the bundle outside the sub-packs.
-            let items = if listing.packs.is_empty() {
-                listing.puzzles
-            } else {
-                listing.loose
-            };
-            Collection { pack, items }
-        }),
-        _ => client.fetch_pack(target.path(), &spinner),
+        Target::Page(author) => {
+            spinner.set_message(format!("listing {} ...", target.path()));
+            client.list_pack(author, &spinner).map(|(pack, listing)| {
+                // Nothing is named on a flat page, so its unnamed collection is
+                // all of it; on a container it is the bundle outside the packs.
+                let items = if listing.packs.is_empty() {
+                    listing.puzzles
+                } else {
+                    listing.loose
+                };
+                (pack, items.into_iter().map(Work::Lookup).collect())
+            })
+        }
+        _ => {
+            spinner.set_message(format!("listing {} ...", target.path()));
+            client.fetch_pack(&target.path(), &spinner).map(|collection| {
+                (
+                    collection.pack,
+                    collection.items.into_iter().map(Work::Lookup).collect(),
+                )
+            })
+        }
     };
     let collected = match collected {
         Ok(collected) => collected,
@@ -455,8 +629,7 @@ fn fetch_and_write(
         }
     };
     spinner.finish_and_clear();
-    let pack = collected.pack;
-    let mut items = collected.items;
+    let (pack, mut work) = collected;
 
     // Everything already in the output file is left alone when resuming, so a
     // re-run only pays for the levels that appeared since the last one.
@@ -465,17 +638,17 @@ fn fetch_and_write(
     } else {
         HashSet::new()
     };
-    let already = items
+    let already = work
         .iter()
-        .filter(|item| present.contains(&item.puzzle_id))
+        .filter(|work| present.contains(&work.puzzle_id()))
         .count();
-    items.retain(|item| !present.contains(&item.puzzle_id));
+    work.retain(|work| !present.contains(&work.puzzle_id()));
 
-    let items: Vec<_> = match args.limit {
-        Some(limit) => items.into_iter().take(limit).collect(),
-        None => items,
+    let work: Vec<_> = match args.limit {
+        Some(limit) => work.into_iter().take(limit).collect(),
+        None => work,
     };
-    if items.is_empty() {
+    if work.is_empty() {
         if already > 0 {
             anstream::println!(
                 "{}: nothing new in {} ({} levels already in {})",
@@ -489,6 +662,10 @@ fn fetch_and_write(
         bail!(
             "{}",
             match target {
+                Target::Level(level) => format!(
+                    "--limit 0 leaves nothing to fetch of {}",
+                    level.path()
+                ),
                 Target::Page(_) => format!(
                     "no levels sit directly on the page of {}",
                     api::display_path(&pack.full_slug)
@@ -502,7 +679,7 @@ fn fetch_and_write(
     }
 
     // Phase 2: fetch every puzzle and convert/filter it for the XSB format.
-    let progress = ProgressBar::new(items.len() as u64);
+    let progress = ProgressBar::new(work.len() as u64);
     progress.enable_steady_tick(Duration::from_millis(100));
     progress.set_style(
         ProgressStyle::with_template(
@@ -518,72 +695,74 @@ fn fetch_and_write(
     let mut failed = 0usize;
     let mut interrupted = false;
 
-    for item in &items {
+    for work in work {
         if stop.load(Ordering::Relaxed) {
             interrupted = true;
             break;
         }
+        let label = work.label();
         progress.set_message(format!(
             "{} - kept {} · skipped {} · failed {}",
-            item.label(),
+            label,
             kept.len(),
             skipped,
             failed,
         ));
-        match client.fetch_puzzle(item.puzzle_id) {
-            Err(err) if !stop.load(Ordering::Relaxed) => {
-                failed += 1;
-                note(&progress, &format!("  failed {}: {err:#}", item.label()));
-            }
-            Err(_) => {
-                interrupted = true;
-                break;
-            }
-            Ok(puzzle) => {
-                if puzzle.guest_locked {
-                    skipped += 1;
-                    skipped_by.guest_locked += 1;
-                    if args.verbose {
-                        note(
-                            &progress,
-                            &format!(
-                                "  skipped {} {}: guest-locked",
-                                puzzle.puzzle_id, puzzle.name
-                            ),
-                        );
+        let puzzle = match work {
+            Work::Ready(puzzle) => *puzzle,
+            Work::Lookup(item) => match client.fetch_puzzle(item.puzzle_id) {
+                Ok(puzzle) => puzzle,
+                Err(err) => {
+                    if stop.load(Ordering::Relaxed) {
+                        interrupted = true;
+                        break;
                     }
-                } else {
-                    fetched += 1;
-                    if puzzle.puzzle_type != "classic" {
-                        // modern designs use a 4-chars-per-cell encoding XSB
-                        // cannot express; docs/API.md §4.
+                    failed += 1;
+                    note(&progress, &format!("  failed {label}: {err:#}"));
+                    progress.inc(1);
+                    continue;
+                }
+            },
+        };
+        if puzzle.guest_locked {
+            skipped += 1;
+            skipped_by.guest_locked += 1;
+            if args.verbose {
+                note(
+                    &progress,
+                    &format!(
+                        "  skipped {} {}: guest-locked",
+                        puzzle.puzzle_id, puzzle.name
+                    ),
+                );
+            }
+        } else {
+            fetched += 1;
+            if puzzle.puzzle_type != "classic" {
+                // modern designs use a 4-chars-per-cell encoding XSB
+                // cannot express; docs/API.md §4.
+                skipped += 1;
+                skipped_by.modern += 1;
+                if args.verbose {
+                    note(
+                        &progress,
+                        &format!(
+                            "  skipped {} {}: {} level",
+                            puzzle.puzzle_id, puzzle.name, puzzle.puzzle_type
+                        ),
+                    );
+                }
+            } else {
+                match convert::to_xsb(&puzzle.design) {
+                    Ok(board) => kept.push((puzzle, board)),
+                    Err(reason) => {
                         skipped += 1;
-                        skipped_by.modern += 1;
+                        skipped_by.rejected += 1;
                         if args.verbose {
                             note(
                                 &progress,
-                                &format!(
-                                    "  skipped {} {}: {} level",
-                                    puzzle.puzzle_id, puzzle.name, puzzle.puzzle_type
-                                ),
+                                &format!("  skipped {} {}: {reason}", puzzle.puzzle_id, puzzle.name),
                             );
-                        }
-                    } else {
-                        match convert::to_xsb(&puzzle.design) {
-                            Ok(board) => kept.push((puzzle, board)),
-                            Err(reason) => {
-                                skipped += 1;
-                                skipped_by.rejected += 1;
-                                if args.verbose {
-                                    note(
-                                        &progress,
-                                        &format!(
-                                            "  skipped {} {}: {reason}",
-                                            puzzle.puzzle_id, puzzle.name
-                                        ),
-                                    );
-                                }
-                            }
                         }
                     }
                 }
@@ -692,7 +871,12 @@ fn existing_ids(path: &Path) -> anyhow::Result<HashSet<i64>> {
 /// from the first level block.
 fn render_header(pack: &Pack, levels: usize) -> String {
     let mut out = String::new();
-    let _ = writeln!(out, "; Sokoban Online - {} ({})", pack.name, pack.path);
+    let _ = writeln!(
+        out,
+        "; Sokoban Online - {} ({})",
+        pack.name,
+        pack.page_path()
+    );
     let _ = writeln!(out, "; {levels} XSB levels");
     let _ = writeln!(
         out,
@@ -739,11 +923,14 @@ mod tests {
                 path: "/play/community/t1024/1_corner01".into(),
                 puzzle_type: "classic".into(),
                 design: String::new(),
+                width: Some(8),
+                height: Some(6),
                 published_date: "2023-08-18T12:34:56Z".into(),
                 guest_locked: false,
                 author: Some(api::Author {
                     display_name: Some("T1024".into()),
                 }),
+                pack: None,
             },
         )
     }
@@ -805,6 +992,13 @@ mod tests {
         let author = |s: &str| Target::Author(s.to_owned());
         let pack = |s: &str| Target::Pack(s.to_owned());
         let page = |s: &str| Target::Page(s.to_owned());
+        let level = |collection: &str, id: i64, slug: &str| {
+            Target::Level(Level {
+                collection: collection.to_owned(),
+                id,
+                slug: slug.to_owned(),
+            })
+        };
 
         assert_eq!(parse_collection("a").unwrap(), author("a"));
         assert_eq!(parse_collection(" a/b ").unwrap(), pack("a/b"));
@@ -814,12 +1008,59 @@ mod tests {
         // a pack holds no sub-packs, so its empty name resolves to itself
         assert_eq!(parse_collection("a/b/").unwrap(), pack("a/b"));
 
+        // a trailing level segment addresses that level, not a collection
+        assert_eq!(
+            parse_collection("obyzz011/remakes/135023_morch").unwrap(),
+            level("obyzz011/remakes", 135023, "morch")
+        );
+        assert_eq!(
+            parse_collection(" obyzz011/remakes/135023_morch/ ").unwrap(),
+            level("obyzz011/remakes", 135023, "morch")
+        );
+        // a level sitting directly on the author's page
+        assert_eq!(
+            parse_collection("obyzz011/135462_puzzle-error").unwrap(),
+            level("obyzz011", 135462, "puzzle-error")
+        );
+        // the slug is decoration: the id alone addresses the same level
+        assert_eq!(
+            parse_collection("obyzz011/remakes/135023").unwrap(),
+            level("obyzz011/remakes", 135023, "")
+        );
+        // ... but a level always needs an author in front of it
+        assert_eq!(parse_collection("135023").unwrap(), author("135023"));
+
         assert!(parse_collection("a//").is_err()); // empty segment
         assert!(parse_collection("").is_err());
         assert!(parse_collection(" ").is_err());
         assert!(parse_collection("/").is_err()); // no author at all
         assert!(parse_collection("https://example.com").is_err()); // ':' invalid
         assert!(parse_collection("a b").is_err()); // space invalid
+    }
+
+    #[test]
+    fn level_paths_round_trip_and_name_their_page() {
+        let level = Level {
+            collection: "obyzz011/remakes".into(),
+            id: 135023,
+            slug: "morch".into(),
+        };
+        assert_eq!(level.path(), "obyzz011/remakes/135023_morch");
+        assert_eq!(
+            level.url(),
+            "https://www.sokobanonline.com/play/community/obyzz011/remakes/135023_morch"
+        );
+        let bare = Level {
+            collection: "obyzz011".into(),
+            id: 135023,
+            slug: String::new(),
+        };
+        assert_eq!(bare.path(), "obyzz011/135023");
+        assert_eq!(
+            Target::Level(level).path(),
+            "obyzz011/remakes/135023_morch",
+            "the API path is the same as the page path"
+        );
     }
 
     #[test]
@@ -840,6 +1081,15 @@ mod tests {
         assert_eq!(
             default_output(&Target::Page("t1024".into())),
             PathBuf::from("t1024-page.txt")
+        );
+        // a level names itself, so it never collides with its collection's file
+        assert_eq!(
+            default_output(&Target::Level(Level {
+                collection: "obyzz011/remakes".into(),
+                id: 135023,
+                slug: "morch".into(),
+            })),
+            PathBuf::from("obyzz011-remakes-135023_morch.txt")
         );
     }
 
@@ -881,8 +1131,9 @@ mod tests {
     // ---- end-to-end tests against a local mock of the API ----
 
     use crate::test_support::{
-        Action, MockServer, Response, wire_detail, wire_listing, wire_listing_loose,
-        wire_pack_counted, wire_pack_item, wire_pack_item_counted, wire_puzzle_item,
+        Action, MockServer, Response, wire_detail, wire_detail_in, wire_listing,
+        wire_listing_loose, wire_pack_counted, wire_pack_item, wire_pack_item_counted,
+        wire_puzzle_item,
     };
     use std::sync::atomic::AtomicUsize;
 
@@ -1559,6 +1810,152 @@ Author: T1024
         );
         let text = std::fs::read_to_string(&out).expect("output file");
         assert!(text.contains("; 2 XSB levels"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- a single level, addressed by its own path ----
+
+    const MORCH: &str = "obyzz011/remakes/135023_morch";
+
+    /// Route `/puzzles/135023` to the detail of `Morch`, which names its pack.
+    fn level_handler(kind: &'static str, design: &'static str) -> impl Fn(usize, &str) -> Action {
+        move |_call, target| match target {
+            "/puzzles/135023" => Action::Respond(Response::json(
+                200,
+                wire_detail_in(
+                    135023,
+                    "Morch",
+                    kind,
+                    design,
+                    "community/obyzz011/remakes",
+                    "Remakes",
+                ),
+            )),
+            _ => Action::Respond(Response::plain(500, "unexpected target")),
+        }
+    }
+
+    #[test]
+    fn run_fetches_one_level_with_a_single_request() {
+        let dir = scratch_dir("one-level");
+        let out = dir.join("out.txt");
+        let (server, client, stop) = mock(level_handler("classic", "#####\n#@$.#\n#####"));
+        assert_eq!(
+            run(fetch_cmd(MORCH, &out), &client, &stop).unwrap(),
+            ExitCode::SUCCESS
+        );
+        assert_eq!(
+            server.calls(),
+            ["/puzzles/135023"],
+            "no listing is needed: the detail names the level and its pack"
+        );
+        let text = std::fs::read_to_string(&out).expect("output file");
+        // the header names the pack the detail reported, whose page path the
+        // API omits and the tool derives from the slug
+        assert!(text.contains("; Sokoban Online - Remakes (/play/community/obyzz011/remakes)"));
+        assert!(text.contains("; 1 XSB levels"));
+        assert!(text.contains("Title: Morch\n"));
+        assert!(text.contains("Author: obyzz011\n"));
+        assert!(text.contains("; URL: https://www.sokobanonline.com/play/community/obyzz011/remakes/135023\n"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_a_missing_level_fails_instead_of_writing_an_empty_file() {
+        let dir = scratch_dir("one-level-missing");
+        let out = dir.join("out.txt");
+        let (server, client, stop) =
+            mock(|_call, _target| Action::Respond(Response::json(404, "{}")));
+        let err = run(fetch_cmd(MORCH, &out), &client, &stop).unwrap_err();
+        assert!(
+            err.to_string().contains("level not found: obyzz011/remakes/135023_morch"),
+            "{err:#}"
+        );
+        assert_eq!(server.calls(), ["/puzzles/135023"], "404 is not retried");
+        assert!(!out.exists(), "nothing is written for a level that is gone");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_a_modern_level_is_reported_as_skipped() {
+        let dir = scratch_dir("one-level-modern");
+        let out = dir.join("out.txt");
+        let (_server, client, stop) = mock(level_handler("modern", "____"));
+        assert_eq!(
+            run(fetch_cmd(MORCH, &out), &client, &stop).unwrap(),
+            ExitCode::SUCCESS
+        );
+        let text = std::fs::read_to_string(&out).expect("output file");
+        assert!(text.contains("; 0 XSB levels"));
+        assert!(!text.contains("Title: Morch"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_resume_leaves_a_level_already_in_the_file_alone() {
+        let dir = scratch_dir("one-level-resume");
+        let out = dir.join("out.txt");
+        let (server, client, stop) = mock(level_handler("classic", "#####\n#@$.#\n#####"));
+        assert_eq!(
+            run(fetch_cmd(MORCH, &out), &client, &stop).unwrap(),
+            ExitCode::SUCCESS
+        );
+        let first = std::fs::read_to_string(&out).expect("output file");
+
+        let mut args = fetch_args(MORCH, &out);
+        args.resume = true;
+        assert_eq!(
+            run(Command::Fetch(args), &client, &stop).unwrap(),
+            ExitCode::SUCCESS
+        );
+        assert_eq!(
+            std::fs::read_to_string(&out).expect("output file"),
+            first,
+            "the level is not duplicated"
+        );
+        assert_eq!(server.calls().len(), 2, "one request per run");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn info_describes_one_level() {
+        let (server, client, stop) = mock(level_handler("classic", "#####\n#@$.#\n#####"));
+        assert_eq!(
+            run(info_cmd(MORCH), &client, &stop).unwrap(),
+            ExitCode::SUCCESS
+        );
+        assert_eq!(server.calls(), ["/puzzles/135023"]);
+    }
+
+    #[test]
+    fn info_a_missing_level_names_the_path() {
+        let (_server, client, stop) =
+            mock(|_call, _target| Action::Respond(Response::json(404, "{}")));
+        let err = run(info_cmd(MORCH), &client, &stop).unwrap_err();
+        assert!(
+            err.to_string().contains("level not found: obyzz011/remakes/135023_morch"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn a_level_whose_detail_omits_the_pack_falls_back_to_its_path() {
+        let dir = scratch_dir("one-level-no-pack");
+        let out = dir.join("out.txt");
+        // wire_detail carries no `pack` at all
+        let (_server, client, stop) = mock(|_call, target| match target {
+            "/puzzles/135023" => detail_action(135023),
+            _ => Action::Respond(Response::plain(500, "unexpected target")),
+        });
+        assert_eq!(
+            run(fetch_cmd(MORCH, &out), &client, &stop).unwrap(),
+            ExitCode::SUCCESS
+        );
+        let text = std::fs::read_to_string(&out).expect("output file");
+        assert!(
+            text.contains("; Sokoban Online - remakes (/play/community/obyzz011/remakes)"),
+            "{text}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

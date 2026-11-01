@@ -45,11 +45,25 @@ pub struct Pack {
     pub name: String,
     #[serde(rename = "fullslug")]
     pub full_slug: String,
+    /// The page path. A listing reports it, a puzzle detail's `pack` does not
+    /// (docs/API.md §3.3), so it is derived from the slug when absent.
+    #[serde(default)]
     pub path: String,
     /// The site's own level counter for this pack. For a container it counts
     /// its sub-packs' levels *and* its own (docs/API.md §3.2.1).
     #[serde(default, rename = "numpuzzles")]
     pub num_puzzles: Option<u64>,
+}
+
+impl Pack {
+    /// The page path, filled in from the slug when the API omits it.
+    pub fn page_path(&self) -> String {
+        if self.path.is_empty() {
+            format!("/play/{}", self.full_slug)
+        } else {
+            self.path.clone()
+        }
+    }
 }
 
 /// Author info embedded in a puzzle detail.
@@ -156,6 +170,10 @@ pub struct Puzzle {
     #[serde(rename = "puzzletype")]
     pub puzzle_type: String,
     pub design: String,
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
     /// ISO 8601 UTC timestamp.
     #[serde(default, rename = "publisheddate")]
     pub published_date: String,
@@ -163,9 +181,22 @@ pub struct Puzzle {
     pub guest_locked: bool,
     #[serde(default)]
     pub author: Option<Author>,
+    /// The pack the level belongs to. Carries the slug but no page path
+    /// (docs/API.md §3.3); `Pack::page_path` fills that in.
+    #[serde(default)]
+    pub pack: Option<Pack>,
 }
 
 impl Puzzle {
+    /// `name (id)`, or just the id when the site gives the level no name.
+    pub fn label(&self) -> String {
+        if self.name.is_empty() {
+            self.puzzle_id.to_string()
+        } else {
+            format!("{} ({})", self.name, self.puzzle_id)
+        }
+    }
+
     /// Display name of the level author, falling back to the pack name.
     pub fn author_name<'a>(&'a self, pack: &'a Pack) -> &'a str {
         self.author

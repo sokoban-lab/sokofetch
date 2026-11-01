@@ -344,6 +344,11 @@ no sitemap scan (§3.5) is involved. `fetch --resume` skips the levels already i
 and appends the rest. A trailing slash addresses the levels on the page alone  
 (`fetch <slug>/`), which is how the collection without a name of its own is spelled.
 
+A path ending in a level segment — `<slug>/<pack>/<id>_<slug>`, the tail of the level's own page  
+URL — fetches that one level: `GET /puzzles/{id}` (§3.3) is the only request, and the `pack`  
+object it returns names the collection the level belongs to. The API reports that pack without a  
+`path`, so the CLI derives `/play/<fullslug>` from the slug.
+
 ## 7. Compliance
 
 robots.txt: `Disallow: /api/`, `Crawl-delay: 5`. Scraping is one-time, low-frequency, and for  
