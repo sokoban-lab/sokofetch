@@ -71,8 +71,8 @@ Fetch a pack's level list by its path (an author page is itself a pack: `communi
   A `membercontainer` author with **no** child packs therefore returns `"puzzles"`  
   (observed for `soko7734`: `packtype=membercontainer`, `numpacks=0`, `kind=puzzles`).  
   The Rust CLI scrapes each child pack of a `"packs"` page (one level of nesting).
-- ⚠️ A pack can own **both** child packs and its own puzzles, but `kind="packs"` lists only the  
-  child packs. See §3.2.1 — this makes such puzzles unreachable from the UI and invisible to the CLI.
+- ⚠️ A pack can own **both** child packs and its own puzzles: `kind="packs"` lists the child  
+  packs in `data.items` and those puzzles in `data.loose`. See §3.2.1.
 
 `data.pack` fields:
 
@@ -119,41 +119,53 @@ Fetch a pack's level list by its path (an author page is itself a pack: `communi
 | `position`       | int    | Position within pack 1..N, no duplicates                                          |
 | `guestlocked`    | bool   | false (no guest locks in this pack)                                               |
 
-### 3.2.1 Container packs that own puzzles directly ⚠️ Verified 2026-10-28
+### 3.2.1 Container packs that own puzzles directly ✅ Re-verified 2026-11-01
 
-A puzzle always belongs to exactly one pack, but that pack does not have to be a leaf group —  
-it can be the author's root `membercontainer` pack. Such a container holds **two kinds of  
-children at once**: its sub-packs *and* its own puzzles, and the API only ever exposes one of them  
-per response (`kind="packs"` → sub-packs only).
+A puzzle belongs to exactly one pack, and that pack need not be a leaf group — it can be the  
+author's root `membercontainer` pack. Such a container holds **two kinds of children at once**:  
+its sub-packs *and* its own puzzles, and a `kind="packs"` response returns both, in separate  
+fields:
 
-Consequences:
+| Field        | Contents                                                                                 |
+| ------------ | ---------------------------------------------------------------------------------------- |
+| `data.items` | the sub-packs, paginated 30 per page (`meta.total` counts these)                          |
+| `data.loose` | `{ "total": n, "items": [...] }`: the container's own puzzles, **unpaginated**, on `page=1` |
 
-- The author page silently hides those puzzles: `/play/community/obyzz011` reports  
-  `Puzzles: 503 in 16 groups`, yet the 16 child packs add up to 499. The remaining **4** puzzles sit  
-  directly in pack `2110` (`packtotal=4`, `position` 1–4) and appear nowhere on the page.
-- They are still `listed=true` and still show up in the global feeds (`/play/new?type=classic`),  
-  because those feeds are pack-independent. They are reachable only by direct URL  
-  (e.g. `/play/community/obyzz011/136063_46-steps`) or by `prev`/`next` from a sibling.
-- Guests have no UI path to them at all. Logged-in users can get a flat puzzle list for a pack from  
-  `GET /api/v1/me/packs/{packid}/puzzles?filter={unsolved|all-solved|gold|silver|bronze|no-trophy-solved}`  
-  (401 without a session; this is what the "Filter puzzles" chips call when `kind="packs"`).
-- A `"packs"` page's `numpuzzles` therefore counts `sum(child packs) + own puzzles`. This explains the  
-  parent/child count mismatch noted earlier for `t1024` (2026-10-28: parent 103, 9 child packs summing 99).
+`data.loose` is `null` when the page owns no puzzles, and on every page after the first. Its  
+items are ordinary listing entries (`puzzleid`, `name`, `path`, `puzzletype`, `position`,  
+`publisheddate`, `guestlocked`, …), so they need no second lookup and keep their names.
 
-Observed instances (2026-10-28):
+```jsonc
+// data of /packs/by-path/community/obyzz011?page=1  (2026-11-01)
+{ "kind": "packs",
+  "pack": { "packid": 2110, "numpuzzles": 515, "numpacks": 16, … },
+  "items": [ { "packid": 2140, "name": "Bridge", "fullslug": "community/obyzz011/bridge",
+               "numpuzzles": 14, … }, … ],                    // 16 sub-packs
+  "loose": { "total": 6,
+             "items": [ { "puzzleid": 135462, "name": "PUZZLE ERROR", "position": 1, … },
+                        { "puzzleid": 136063, "name": "46 steps?", "position": 2, … }, … ] } }
+```
 
-| Author   | Container pack | `numpuzzles` | Child packs | Sum | Orphans                          |
-| -------- | -------------- | ------------ | ----------- | --- | -------------------------------- |
-| obyzz011 | 2110           | 503          | 16          | 499 | 4                                |
-| t1024    | 2187           | 103          | 9           | 99  | 4                                |
-| aymdup   | —              | 94           | 4           | 94  | 0                                |
-| soko7734 | 1846           | 461          | 0           | —   | 0 (no sub-packs, `kind=puzzles`) |
+Observed 2026-11-01: `obyzz011` → `loose.total = 6`, `t1024` → 4, `aymdup` (4 sub-packs, none  
+loose) → `null`, `soko7734` (`kind="puzzles"`, no sub-packs) → `null`.
 
+Counter arithmetic: a `"packs"` page's `numpuzzles` counts `Σ sub-pack numpuzzles + loose.total`  
+(2026-11-01: obyzz011 515 = 509 + 6; t1024 105 = 101 + 4), which is how the levels that belong  
+to no sub-pack were detected while `loose` did not exist yet.
 
-**Impact on this CLI**: scraping a `"packs"` author page misses exactly these orphans — they are not in  
-any child pack and the pack endpoints cannot return them. They *can* be enumerated from the site's  
-sitemap (§3.5), which is what the CLI does; the pack counter makes the miss detectable, so the scan is  
-skipped whenever the counters account for every level (`Collection::hidden` in `src/api.rs`).
+History: before 2026-11-01 the field was absent, `kind="packs"` returned sub-packs only, and  
+these puzzles were unreachable through the API — the author page said "Puzzles: 503 in 16  
+groups" while the groups added up to 499, and the only enumeration path was the sitemap (§3.5).  
+The site has since surfaced them in the UI as a "Puzzles not in a group" shelf below the groups  
+(`loose` in the frontend bundle), which is where the field name comes from.
+
+Logged-in users can also get a pack's puzzles as one flat, paginated list from  
+`GET /api/v1/me/packs/{packid}/puzzles?filter={unsolved|all-solved|gold|silver|bronze|no-trophy-solved}`  
+(401 without a session); that returns sub-pack puzzles and loose ones together.
+
+**Impact on this CLI**: none to recover — `data.loose` is read off the first listing page  
+(`Listing::loose` in `src/api.rs`), so a collection costs one request per listing and no sitemap  
+scan. If `loose.total` ever exceeds `loose.items`, the bundle was truncated and the CLI warns.
 
 ### 3.3 `GET /api/v1/puzzles/{puzzleid}` ✅ Verified
 
@@ -209,12 +221,13 @@ Puzzle URLs come in three shapes:
 
 The number of segments after the author slug is what identifies a level sitting on the page: exactly one means  
 the level hangs off the author's root container pack, i.e. it is one of the levels §3.2.1 describes.  
-Matching `<loc>` against `play/{collection}/` and keeping single-segment remainders reproduces the  
-hidden set exactly (2026-10-28: obyzz011 4 of 4, t1024 4 of 4 — both equal to  
-`numpuzzles − Σ sub-packs`).
+Matching `<loc>` against `play/{collection}/` and keeping single-segment remainders reproduces that set  
+(2026-10-28: obyzz011 4 of 4, t1024 4 of 4). Since 2026-11-01 the listing reports the same levels in  
+`data.loose` (§3.2.1), so the CLI no longer reads the sitemaps; they remain the only unauthenticated  
+enumeration path outside `/api/`, and they lag behind: on 2026-11-01 `obyzz011` had 6 levels on the page,  
+of which the sitemap still listed 5.
 
-Cost: one request for the index plus one per shard; the CLI pays it at most once per run, and  
-only when the pack counters show levels that no sub-pack holds.
+Cost: one request for the index plus one per shard, ~1 MB over the wire (~16 MB of XML decompressed).
 
 ## 4. `design` Board Encoding Specification
 
@@ -326,9 +339,9 @@ map + trailing `Title:`/`Author:`/`URL:` metadata lines; supports membercontaine
 
 `cargo run -- info <slug>` prints the same structure without fetching levels: the sub-packs with  
 their counts, plus the levels that sit directly on the page (§3.2.1) — always part of the  
-collection, no flag needed. `fetch` downloads both kinds, consulting the sitemap (§3.5) only when  
-the counters show something is on the page to recover; `fetch --resume` skips the levels already  
-in the output file and appends the rest. A trailing slash addresses the levels on the page alone  
+collection, no flag needed. `fetch` downloads both kinds; both come out of the listing itself, so  
+no sitemap scan (§3.5) is involved. `fetch --resume` skips the levels already in the output file  
+and appends the rest. A trailing slash addresses the levels on the page alone  
 (`fetch <slug>/`), which is how the collection without a name of its own is spelled.
 
 ## 7. Compliance
@@ -336,5 +349,6 @@ in the output file and appends the rest. A trailing slash addresses the levels o
 robots.txt: `Disallow: /api/`, `Crawl-delay: 5`. Scraping is one-time, low-frequency, and for  
 personal use only; level copyrights belong to their respective authors — do not redistribute.
 
-The sitemap route (§3.5) is the path `robots.txt` explicitly advertises, but it is still ~1 MB  
-compressed (~16 MB of XML) for 3 requests: run it once, not in a loop.
+The CLI stays inside `/api/`: a collection costs one request per listing page plus one per level.  
+The sitemap route (§3.5) is the path `robots.txt` explicitly advertises, but it is ~1 MB compressed  
+(~16 MB of XML) for 4 requests, and the API now returns the same levels directly — nothing needs it.
