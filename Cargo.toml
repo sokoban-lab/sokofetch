@@ -1,5 +1,5 @@
 [package]
-name = "sokobanonline"
+name = "sokofetch"
 version = "0.1.4"
 edition = "2024"
 description = "Fetch Sokoban levels from sokobanonline.com or letslogic.com into an XSB level collection (.txt)"

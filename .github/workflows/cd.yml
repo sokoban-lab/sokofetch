@@ -44,7 +44,7 @@ jobs:
         run: |
           set -euo pipefail
           version=$(cargo metadata --no-deps --locked --format-version 1 \
-            | jq -r '.packages[] | select(.name == "sokobanonline") | .version')
+            | jq -r '.packages[] | select(.name == "sokofetch") | .version')
 
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
             tag="$GITHUB_REF_NAME"
@@ -143,7 +143,7 @@ jobs:
 
       - name: Strip binary
         if: runner.os != 'Windows'
-        run: strip "target/${{ matrix.target }}/release/sokobanonline"
+        run: strip "target/${{ matrix.target }}/release/sokofetch"
 
       - name: Package release archive
         shell: bash
@@ -151,13 +151,13 @@ jobs:
           VERSION: ${{ needs.meta.outputs.version }}
         run: |
           set -euo pipefail
-          name="sokobanonline-${VERSION}-${{ matrix.target }}"
+          name="sokofetch-${VERSION}-${{ matrix.target }}"
           stage="${RUNNER_TEMP:?}/${name}"
           mkdir -p "${stage}" dist
 
-          exe="sokobanonline"
+          exe="sokofetch"
           if [[ "${{ matrix.target }}" == *-windows-* ]]; then
-            exe="sokobanonline.exe"
+            exe="sokofetch.exe"
           fi
           cp "target/${{ matrix.target }}/release/${exe}" "${stage}/"
           cp README.md LICENSE-APACHE LICENSE-MIT "${stage}/"
@@ -172,7 +172,7 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:
-          name: sokobanonline-${{ matrix.target }}
+          name: sokofetch-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
           retention-days: 7
@@ -210,7 +210,7 @@ jobs:
       - name: Download build artifacts
         uses: actions/download-artifact@v8
         with:
-          pattern: sokobanonline-*
+          pattern: sokofetch-*
           path: dist
           merge-multiple: true
 
@@ -223,7 +223,7 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          assets=(dist/sokobanonline-*.tar.gz dist/sokobanonline-*.zip)
+          assets=(dist/sokofetch-*.tar.gz dist/sokofetch-*.zip)
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --title "$VERSION Release" --notes-file release-notes.md
             gh release upload "$TAG" "${assets[@]}" --clobber
